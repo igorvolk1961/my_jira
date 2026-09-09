@@ -353,6 +353,13 @@ def init_db(path=None):
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_executor_per_subtask ON task_assignment(task_id) WHERE task_kind='subtask' AND is_deleted=0")
     except sqlite3.IntegrityError:
         pass
+
+    # Типы задач: отдельное наполнение (для существующих БД, где основные справочники уже есть)
+    if db.execute("SELECT COUNT(*) FROM task_type").fetchone()[0] == 0:
+        db.executemany("INSERT INTO task_type (name) VALUES (?)",
+                       [(t,) for t in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
+                                       'Документирование', 'Тестирование')])
+        db.commit()
     
     # Начальное заполнение справочников
     if db.execute("SELECT COUNT(*) FROM priority").fetchone()[0] == 0:
@@ -406,12 +413,6 @@ def init_db(path=None):
             ('Выполнена', 'green'), ('Отменена', 'red'), ('Заблокирована', 'orange')
         ]
         db.executemany("INSERT INTO task_status (name, color) VALUES (?, ?)", task_statuses)
-        
-        task_types = [
-            'Новый функционал', 'Исправление ошибки', 'Улучшение',
-            'Документирование', 'Тестирование'
-        ]
-        db.executemany("INSERT INTO task_type (name) VALUES (?)", [(t,) for t in task_types])
         
         db.commit()
     
