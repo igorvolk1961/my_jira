@@ -14,7 +14,7 @@ import os
 import shutil
 
 app = Flask(__name__)
-app.secret_key = 'upo_secret_key_2026'
+app.secret_key = os.environ.get('UPO_SECRET_KEY', 'upo_secret_key_2026')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_DIR = os.path.join(BASE_DIR, 'data')
@@ -5328,10 +5328,13 @@ def comment_delete(id):
 
 #==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
+# Инициализация БД при импорте (важно для gunicorn/WSGI, где main.py не выполняется как __main__)
+init_db()
+
 if __name__ == '__main__':
-    init_db()
     print("=" * 60)
-    print("Учебный проектный офис (УПО) запущен!")
-    print("Откройте в браузере: http://127.0.0.1:5000")
+    print(f"Учебный проектный офис (УПО) запущен! Активная БД: {DEFAULT_DB_NAME}")
     print("=" * 60)
-    app.run(debug=True, host='127.0.0.1', port=5000)
+    app.run(debug=os.environ.get('UPO_DEBUG', '') == '1',
+            host=os.environ.get('HOST', '0.0.0.0'),
+            port=int(os.environ.get('PORT', '5000')))
