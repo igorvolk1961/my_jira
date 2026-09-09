@@ -235,6 +235,7 @@ def init_db(path=None):
         CREATE TABLE IF NOT EXISTS subtask (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             parent_task_id INTEGER NOT NULL REFERENCES task(id) ON DELETE CASCADE,
+            parent_subtask_id INTEGER REFERENCES subtask(id) ON DELETE CASCADE,
             description TEXT NOT NULL,
             stage_id INTEGER REFERENCES project_stage(id),
             priority_id INTEGER NOT NULL REFERENCES priority(id),
@@ -291,6 +292,18 @@ def init_db(path=None):
             UNIQUE(project_id, employee_id)
         );
 
+        -- Комментарии к задачам и подзадачам
+        CREATE TABLE IF NOT EXISTS comment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity_type TEXT NOT NULL CHECK(entity_type IN ('task', 'subtask')),
+            entity_id INTEGER NOT NULL,
+            author TEXT,
+            text TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+
         -- Интервью стейкхолдеров
         CREATE TABLE IF NOT EXISTS interview (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,6 +333,13 @@ def init_db(path=None):
     ecols = [r[1] for r in db.execute("PRAGMA table_info(employee)").fetchall()]
     if 'is_stackholder' not in ecols:
         db.execute("ALTER TABLE employee ADD COLUMN is_stackholder INTEGER NOT NULL DEFAULT 0")
+    subcols = [r[1] for r in db.execute("PRAGMA table_info(subtask)").fetchall()]
+    if 'parent_subtask_id' not in subcols:
+        db.execute("ALTER TABLE subtask ADD COLUMN parent_subtask_id INTEGER REFERENCES subtask(id)")
+    try:
+        db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_executor_per_subtask ON task_assignment(task_id) WHERE task_kind='subtask' AND is_deleted=0")
+    except sqlite3.IntegrityError:
+        pass
     
     # Начальное заполнение справочников
     if db.execute("SELECT COUNT(*) FROM priority").fetchone()[0] == 0:
@@ -422,6 +442,57 @@ def sync_stakeholder_for_employee(db, eid, active):
         for ex in linked:
             db.execute("UPDATE stakeholder SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (ex['id'],))
 
+def _entity_project_id(db, etype, eid):
+    if etype == 'task':
+        r = db.execute("SELECT COALESCE(ps.project_id, r.project_id) pid FROM task t LEFT JOIN project_stage ps ON t.stage_id=ps.id LEFT JOIN requirement r ON t.requirement_id=r.id WHERE t.id=? AND t.is_deleted=0", (eid,)).fetchone()
+    else:
+        r = db.execute("SELECT COALESCE(ps.project_id, r.project_id) pid FROM subtask s JOIN task t ON s.parent_task_id=t.id LEFT JOIN project_stage ps ON t.stage_id=ps.id LEFT JOIN requirement r ON t.requirement_id=r.id WHERE s.id=? AND s.is_deleted=0", (eid,)).fetchone()
+    return r[0] if r and r[0] else None
+
+def _entity_comments(db, etype, eid):
+    return db.execute("SELECT * FROM comment WHERE entity_type=? AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (etype, eid)).fetchall()
+
+def _last_comment(db, etype, eid):
+    return db.execute("SELECT * FROM comment WHERE entity_type=? AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC LIMIT 1", (etype, eid)).fetchone()
+
+def _comments_html(db, etype, eid, origin):
+    last = _last_comment(db, etype, eid)
+    add = f'<a href="{url_for("comment_create", entity_type=etype, entity_id=eid, origin=origin)}" class="btn btn-primary">+ Комментарий</a>'
+    if last:
+        top = (f'<div class="comment"><strong>{html.escape(last["author"] or "—")}</strong> · '
+               f'{html.escape(str(last["created_at"]))}<br>{html.escape(last["text"])}</div>')
+    else:
+        top = '<div class="muted">Комментариев нет</div>'
+    return f'<div class="comments"><div class="comment-note">Последний комментарий:</div>{top} {add}</div>'
+
+def _soft_delete_subtask_tree(db, root_id):
+    to_delete = db.execute("SELECT id FROM subtask WHERE id=? AND is_deleted=0", (root_id,)).fetchall()
+    ids = [r[0] for r in to_delete]
+    frontier = list(ids)
+    while frontier:
+        ph = ','.join('?' * len(frontier))
+        kids = db.execute(f"SELECT id FROM subtask WHERE parent_subtask_id IN ({ph}) AND is_deleted=0", tuple(frontier)).fetchall()
+        frontier = [r[0] for r in kids]
+        ids.extend(frontier)
+    if ids:
+        ph = ','.join('?' * len(ids))
+        db.execute(f"UPDATE subtask SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id IN ({ph})", tuple(ids))
+
+def _project_employee_options(db):
+    """Опции сотрудников проекта с должностью и текущей загруженностью (сумма долей)."""
+    proj_emp = {}
+    for row in db.execute("""
+        SELECT pe.project_id, e.id, e.last_name, e.first_name, pt.name pos,
+               COALESCE((SELECT SUM(ta.share) FROM task_assignment ta WHERE ta.employee_id=e.id AND ta.is_deleted=0),0) load
+        FROM project_employee pe
+        JOIN employee e ON pe.employee_id=e.id
+        JOIN position_type pt ON e.position_type_id=pt.id
+        WHERE pe.is_deleted=0 AND e.is_deleted=0 ORDER BY e.last_name
+    """):
+        proj_emp.setdefault(row['project_id'], []).append(
+            f'<option value="{row["id"]}">{row["last_name"]} {row["first_name"]} — {row["pos"]} (загрузка {int(row["load"] * 100)}%)</option>')
+    return proj_emp
+
 # ==================== БАЗОВЫЙ ШАБЛОН ====================
 
 BASE_TEMPLATE = '''
@@ -478,11 +549,15 @@ BASE_TEMPLATE = '''
         .tab-content { display: none; }
         .tab-content.active { display: block; }
         .tree details { border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px; background: #fbfbfb; }
-        .tree summary { cursor: pointer; padding: 10px 14px; font-weight: bold; background: #ecf0f1; border-radius: 6px; }
+        .tree summary { cursor: pointer; padding: 10px 14px; font-weight: bold; background: #ecf0f1; border-radius: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
         .tree details > .node-body { padding: 8px 14px; }
         .tree .node-meta { font-weight: normal; font-size: 13px; color: #7f8c8d; }
-        .tree .node-actions { float: right; font-weight: normal; }
+        .tree .node-info { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .tree .node-actions { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; white-space: nowrap; font-weight: normal; }
         .assign { font-size: 13px; color: #34495e; margin-top: 6px; }
+        .comments { margin: 8px 0; padding: 8px 10px; background: #f4f6f7; border-left: 3px solid #3498db; }
+        .comments .comment-note { font-size: 12px; color: #7f8c8d; margin-bottom: 4px; }
+        .comments .comment { font-size: 13px; margin-bottom: 6px; }
         .muted { color: #95a5a6; }
         .name-cell { white-space: nowrap; min-width: 200px; }
     </style>
@@ -1417,7 +1492,6 @@ def project_detail(id):
     """, (id, id)).fetchall()
 
     task_ids = [t['id'] for t in tasks]
-    subtasks_by_task = {tid: [] for tid in task_ids}
     subtasks = []
     if task_ids:
         ph = ','.join('?' * len(task_ids))
@@ -1429,8 +1503,12 @@ def project_detail(id):
             WHERE st.is_deleted=0 AND st.parent_task_id IN ({ph})
             ORDER BY st.id
         """, tuple(task_ids)).fetchall()
-        for st in subtasks:
-            subtasks_by_task[st['parent_task_id']].append(st)
+    sub_children = {}
+    top_by_task = {}
+    for st in subtasks:
+        sub_children.setdefault(st['parent_subtask_id'], []).append(st)
+        if st['parent_subtask_id'] is None:
+            top_by_task.setdefault(st['parent_task_id'], []).append(st)
 
     assignments = {}
     def collect_assignments(kind, ids):
@@ -1457,33 +1535,60 @@ def project_detail(id):
         return f'<div class="assign">{render_assignees(assignments.get((kind, tid), []))}</div>'
 
     def render_subtask(st):
+        children = sub_children.get(st['id'], [])
         asg = url_for('task_assignment_create', task_id=st['id'], task_kind='subtask', origin=id)
+        edit_link = url_for('subtask_edit', id=st['id'], origin=id)
+        child_link = url_for('subtask_create', parent_subtask_id=st['id'], origin=id)
+        del_link = url_for('subtask_delete', id=st['id'])
+        comments_html = _comments_html(db, 'subtask', st['id'], id)
         return f'''
-            <details class="subtask">
+            <details class="subtask" open>
                 <summary>
-                    Подзадача #{st['id']}: {st['description'][:60]}
-                    <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
-                    <span class="node-meta">Приоритет: {st['priority_name']}</span>
-                    <a class="btn btn-warning node-actions" href="{asg}">Назначить</a>
+                    <span class="node-info">
+                        Подзадача #{st['id']}: {st['description'][:60]}
+                        <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
+                        <span class="node-meta">Приоритет: {st['priority_name']}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-warning" href="{asg}">Назначить</a>
+                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
+                        <a class="btn btn-success" href="{child_link}">+ Подзадача</a>
+                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
                 </summary>
                 <div class="node-body">
+                    {comments_html}
                     {st['description']}
                     {render_assignments_block('subtask', st['id'])}
+                    {''.join([render_subtask(c) for c in children])}
                 </div>
             </details>'''
 
     def render_task(t):
-        subtask_html = ''.join([render_subtask(s) for s in subtasks_by_task.get(t['id'], [])])
+        task_subtasks = top_by_task.get(t['id'], [])
+        subtask_html = ''.join([render_subtask(s) for s in task_subtasks])
         asg = url_for('task_assignment_create', task_id=t['id'], task_kind='task', origin=id)
+        subtask_link = url_for('subtask_create', parent_task_id=t['id'], origin=id)
+        edit_link = url_for('task_edit', id=t['id'], origin=id)
+        del_link = url_for('task_delete', id=t['id'])
+        comments_html = _comments_html(db, 'task', t['id'], id)
         return f'''
-            <details class="task">
+            <details class="task" open>
                 <summary>
-                    Задача #{t['id']}: {t['description'][:60]}
-                    <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
-                    <span class="node-meta">Приоритет: {t['priority_name']}</span>
-                    <a class="btn btn-warning node-actions" href="{asg}">Назначить</a>
+                    <span class="node-info">
+                        Задача #{t['id']}: {t['description'][:60]}
+                        <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
+                        <span class="node-meta">Приоритет: {t['priority_name']}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-warning" href="{asg}">Назначить</a>
+                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
+                        <a class="btn btn-success" href="{subtask_link}">+ Подзадача</a>
+                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
                 </summary>
                 <div class="node-body">
+                    {comments_html}
                     {t['description']}
                     {render_assignments_block('task', t['id'])}
                     {subtask_html}
@@ -1505,21 +1610,20 @@ def project_detail(id):
         if not stage_tasks:
             inner = '<div class="node-body muted">Задач по этапу нет</div>'
         stage_html += f'''
-            <details class="stage">
+            <details class="stage" open>
                 <summary>
-                    {s['type_name']}
-                    <span class="badge" style="background: {s['color'] or '#95a5a6'}">{s['status_name']}</span>
-                    <span class="node-meta">План. окончание: {s['planned_end'] or '-'}</span>
+                    <span class="node-info">
+                        {s['type_name']}
+                        <span class="badge" style="background: {s['color'] or '#95a5a6'}">{s['status_name']}</span>
+                        <span class="node-meta">План. окончание: {s['planned_end'] or '-'}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-success" href="{url_for('task_create', stage_id=s['id'], origin=id)}">+ Задача</a>
+                        <a class="btn btn-danger" href="{url_for('project_stage_delete', id=s['id'])}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
                 </summary>
                 <div class="node-body">{inner}</div>
             </details>'''
-    if no_stage:
-        stage_html += f'''
-            <details class="stage">
-                <summary>Без этапа <span class="node-meta">задач: {len(no_stage)}</span></summary>
-                <div class="node-body">{''.join([render_task(t) for t in no_stage])}</div>
-            </details>'''
-
     req_rows = ''.join([f'''
         <tr>
             <td>{r['id']}</td>
@@ -2735,6 +2839,12 @@ def project_stage_edit(id):
 @app.route('/project_stages/delete/<int:id>')
 def project_stage_delete(id):
     db = get_db()
+    rows = db.execute("SELECT id FROM task WHERE stage_id=? AND is_deleted=0", (id,)).fetchall()
+    task_ids = [r[0] for r in rows]
+    if task_ids:
+        ph = ','.join('?' * len(task_ids))
+        db.execute(f"UPDATE subtask SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE parent_task_id IN ({ph}) AND is_deleted=0", tuple(task_ids))
+        db.execute(f"UPDATE task SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id IN ({ph})", tuple(task_ids))
     db.execute("UPDATE project_stage SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
     db.commit()
     db.close()
@@ -2901,38 +3011,59 @@ def tasks_list():
 def task_create():
     db = get_db()
     if request.method == 'POST':
+        stage_id = request.form.get('stage_id')
+        if not stage_id:
+            db.close()
+            flash('Задача должна быть создана под этапом — выберите этап', 'error')
+            origin = request.form.get('origin')
+            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('tasks_list'))
         db.execute("""INSERT INTO task (requirement_id, description, stage_id, priority_id, deadline, status_id)
                      VALUES (?, ?, ?, ?, ?, ?)""",
                   (request.form.get('requirement_id') or None,
                    request.form['description'],
-                   request.form.get('stage_id') or None,
+                   int(stage_id),
                    int(request.form['priority_id']),
                    request.form.get('deadline') or None,
                    int(request.form['status_id'])))
         db.commit()
         db.close()
         flash('Задача создана', 'success')
+        origin = request.form.get('origin')
+        if origin:
+            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
         return redirect(url_for('tasks_list'))
 
     requirements = db.execute(
         "SELECT r.id, r.description, p.name as project_name FROM requirement r JOIN project p ON r.project_id=p.id WHERE r.is_deleted=0").fetchall()
     stages = db.execute(
-        "SELECT ps.id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
+        "SELECT ps.id, ps.project_id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
     db.close()
 
+    pre_stage = request.args.get('stage_id')
+    origin = request.args.get('origin')
+    if not pre_stage and stages:
+        chosen = stages[0]
+        if origin:
+            for s in stages:
+                if str(s['project_id']) == str(origin):
+                    chosen = s
+                    break
+        pre_stage = str(chosen['id'])
     req_options = '<option value="">Не выбрано</option>' + ''.join(
         [f'<option value="{r["id"]}">[{r["project_name"]}] {r["description"][:50]}</option>' for r in requirements])
-    stage_options = '<option value="">Не выбран</option>' + ''.join(
-        [f'<option value="{s["id"]}">[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
+    stage_options = '<option value="">— выберите этап —</option>' + ''.join(
+        [f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_stage else ""}>[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
     status_options = ''.join([f'<option value="{s["id"]}">{s["name"]}</option>' for s in statuses])
+    cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('tasks_list')
 
     content = f'''
     <div class="card">
         <h2>Новая задача</h2>
         <form method="POST">
+            <input type="hidden" name="origin" value="{origin or ''}">
             <div class="form-group">
                 <label>Требование</label>
                 <select name="requirement_id">{req_options}</select>
@@ -2943,7 +3074,7 @@ def task_create():
             </div>
             <div class="form-group">
                 <label>Этап проекта</label>
-                <select name="stage_id">{stage_options}</select>
+                <select name="stage_id" required>{stage_options}</select>
             </div>
             <div class="form-group">
                 <label>Приоритет</label>
@@ -2958,7 +3089,7 @@ def task_create():
                 <select name="status_id" required>{status_options}</select>
             </div>
             <button type="submit" class="btn btn-success">Создать</button>
-            <a href="{url_for('tasks_list')}" class="btn btn-primary">Отмена</a>
+            <a href="{cancel_url}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''
@@ -2968,17 +3099,25 @@ def task_create():
 def task_edit(id):
     db = get_db()
     if request.method == 'POST':
+        stage_id = request.form.get('stage_id')
+        if not stage_id:
+            db.close()
+            flash('Задача должна быть под этапом — выберите этап', 'error')
+            return redirect(url_for('tasks_list'))
         db.execute("""UPDATE task SET requirement_id=?, description=?, stage_id=?,
                      priority_id=?, deadline=?, status_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (request.form.get('requirement_id') or None,
                    request.form['description'],
-                   request.form.get('stage_id') or None,
+                   int(stage_id),
                    int(request.form['priority_id']),
                    request.form.get('deadline') or None,
                    int(request.form['status_id']), id))
         db.commit()
         db.close()
         flash('Задача обновлена', 'success')
+        origin = request.form.get('origin')
+        if origin:
+            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
         return redirect(url_for('tasks_list'))
 
     task = db.execute("SELECT * FROM task WHERE id=?", (id,)).fetchone()
@@ -2994,10 +3133,12 @@ def task_edit(id):
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
     db.close()
 
+    origin = request.args.get('origin')
+    cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('tasks_list')
     req_options = '<option value="">Не выбрано</option>' + ''.join([
                                                                        f'<option value="{r["id"]}" {"selected" if r["id"] == task["requirement_id"] else ""}>[{r["project_name"]}] {r["description"][:50]}</option>'
                                                                        for r in requirements])
-    stage_options = '<option value="">Не выбран</option>' + ''.join([
+    stage_options = '<option value="">— выберите этап —</option>' + ''.join([
                                                                         f'<option value="{s["id"]}" {"selected" if s["id"] == task["stage_id"] else ""}>[{s["project_name"]}] {s["type_name"]}</option>'
                                                                         for s in stages])
     priority_options = ''.join(
@@ -3011,6 +3152,7 @@ def task_edit(id):
     <div class="card">
         <h2>Редактировать задачу</h2>
         <form method="POST">
+            <input type="hidden" name="origin" value="{origin or ''}">
             <div class="form-group">
                 <label>Требование</label>
                 <select name="requirement_id">{req_options}</select>
@@ -3021,7 +3163,7 @@ def task_edit(id):
             </div>
             <div class="form-group">
                 <label>Этап проекта</label>
-                <select name="stage_id">{stage_options}</select>
+                <select name="stage_id" required>{stage_options}</select>
             </div>
             <div class="form-group">
                 <label>Приоритет</label>
@@ -3036,7 +3178,7 @@ def task_edit(id):
                 <select name="status_id" required>{status_options}</select>
             </div>
             <button type="submit" class="btn btn-success">Сохранить</button>
-            <a href="{url_for('tasks_list')}" class="btn btn-primary">Отмена</a>
+            <a href="{cancel_url}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''
@@ -3046,6 +3188,7 @@ def task_edit(id):
 def task_delete(id):
     db = get_db()
     db.execute("UPDATE task SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.execute("UPDATE subtask SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE parent_task_id=? AND is_deleted=0", (id,))
     db.commit()
     db.close()
     flash('Задача удалена', 'success')
@@ -3101,9 +3244,24 @@ def subtasks_list():
 def subtask_create():
     db = get_db()
     if request.method == 'POST':
-        db.execute("""INSERT INTO subtask (parent_task_id, description, stage_id, priority_id, deadline, status_id)
-                     VALUES (?, ?, ?, ?, ?, ?)""",
-                  (int(request.form['parent_task_id']),
+        psid = request.form.get('parent_subtask_id') or None
+        ptid = request.form.get('parent_task_id')
+        if psid:
+            root = db.execute("SELECT parent_task_id FROM subtask WHERE id=? AND is_deleted=0", (int(psid),)).fetchone()
+            if root:
+                parent_task_id = root[0]
+            else:
+                psid = None
+                parent_task_id = int(ptid) if ptid else None
+        else:
+            parent_task_id = int(ptid) if ptid else None
+        if not parent_task_id:
+            db.close()
+            flash('Подзадача должна относиться к задаче', 'error')
+            return redirect(url_for('subtasks_list'))
+        db.execute("""INSERT INTO subtask (parent_task_id, parent_subtask_id, description, stage_id, priority_id, deadline, status_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                  (parent_task_id, psid,
                    request.form['description'],
                    request.form.get('stage_id') or None,
                    int(request.form['priority_id']),
@@ -3112,25 +3270,44 @@ def subtask_create():
         db.commit()
         db.close()
         flash('Подзадача создана', 'success')
+        origin = request.form.get('origin')
+        if origin:
+            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
         return redirect(url_for('subtasks_list'))
 
     tasks = db.execute("SELECT * FROM task WHERE is_deleted=0").fetchall()
+    subtasks = db.execute("SELECT * FROM subtask WHERE is_deleted=0").fetchall()
     stages = db.execute(
         "SELECT ps.id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
     db.close()
 
-    task_options = ''.join([f'<option value="{t["id"]}">{t["id"]}. {t["description"][:50]}</option>' for t in tasks])
+    pre_task = request.args.get('parent_task_id')
+    pre_psub = request.args.get('parent_subtask_id')
+    origin = request.args.get('origin')
+    root_task = pre_task
+    if pre_psub:
+        r = db.execute("SELECT parent_task_id FROM subtask WHERE id=? AND is_deleted=0", (int(pre_psub),)).fetchone()
+        root_task = str(r[0]) if r else pre_task
+    task_options = ''.join([f'<option value="{t["id"]}" {"selected" if str(t["id"]) == root_task else ""}>{t["id"]}. {t["description"][:50]}</option>' for t in tasks])
+    subtask_options = '<option value="">— нет, подзадача напрямую от задачи —</option>' + ''.join(
+        [f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_psub else ""}>{s["id"]}. {s["description"][:50]}</option>' for s in subtasks])
     stage_options = '<option value="">Не выбран</option>' + ''.join(
         [f'<option value="{s["id"]}">[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
     status_options = ''.join([f'<option value="{s["id"]}">{s["name"]}</option>' for s in statuses])
+    cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('subtasks_list')
 
     content = f'''
     <div class="card">
         <h2>Новая подзадача</h2>
         <form method="POST">
+            <input type="hidden" name="origin" value="{origin or ''}">
+            <div class="form-group">
+                <label>Родительская подзадача</label>
+                <select name="parent_subtask_id">{subtask_options}</select>
+            </div>
             <div class="form-group">
                 <label>Родительская задача</label>
                 <select name="parent_task_id" required>{task_options}</select>
@@ -3156,7 +3333,7 @@ def subtask_create():
                 <select name="status_id" required>{status_options}</select>
             </div>
             <button type="submit" class="btn btn-success">Создать</button>
-            <a href="{url_for('subtasks_list')}" class="btn btn-primary">Отмена</a>
+            <a href="{cancel_url}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''
@@ -3242,7 +3419,7 @@ def subtask_edit(id):
 @app.route('/subtasks/delete/<int:id>')
 def subtask_delete(id):
     db = get_db()
-    db.execute("UPDATE subtask SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    _soft_delete_subtask_tree(db, id)
     db.commit()
     db.close()
     flash('Подзадача удалена', 'success')
@@ -3309,6 +3486,14 @@ def task_assignment_create():
                 db.close()
                 flash('Исполнитель не назначен на проект задачи', 'error')
                 return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+        if kind == 'subtask':
+            existing = db.execute("SELECT id FROM task_assignment WHERE task_id=? AND task_kind='subtask' AND is_deleted=0", (task_id,)).fetchone()
+            if existing:
+                db.execute("UPDATE task_assignment SET employee_id=?, share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (emp_id, float(request.form['share']), existing['id']))
+                db.commit()
+                db.close()
+                flash('Исполнитель подзадачи заменён (у подзадачи один исполнитель)', 'success')
+                return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
         db.execute("""INSERT INTO task_assignment (task_id, task_kind, employee_id, share)
                      VALUES (?, ?, ?, ?)""",
                   (task_id,
@@ -3340,13 +3525,7 @@ def task_assignment_create():
         WHERE s.is_deleted=0
     """):
         task_proj['subtask:' + str(s['id'])] = s['pid']
-    proj_emp = {}
-    for row in db.execute("""
-        SELECT pe.project_id, e.id, e.last_name, e.first_name
-        FROM project_employee pe JOIN employee e ON pe.employee_id=e.id
-        WHERE pe.is_deleted=0 AND e.is_deleted=0 ORDER BY e.last_name
-    """):
-        proj_emp.setdefault(row['project_id'], []).append(f'<option value="{row["id"]}">{row["last_name"]} {row["first_name"]}</option>')
+    proj_emp = _project_employee_options(db)
     db.close()
     task_proj_json = json.dumps({k: (str(v) if v else '') for k, v in task_proj.items()})
     proj_emp_json = json.dumps({str(k): ''.join(v) for k, v in proj_emp.items()})
@@ -3434,6 +3613,12 @@ def task_assignment_edit(id):
                 db.close()
                 flash('Исполнитель не назначен на проект задачи', 'error')
                 return redirect(url_for('task_assignments_list'))
+        if kind == 'subtask':
+            conflict = db.execute("SELECT id FROM task_assignment WHERE task_id=? AND task_kind='subtask' AND is_deleted=0 AND id<>?", (task_id, id)).fetchone()
+            if conflict:
+                db.close()
+                flash('У подзадачи уже есть исполнитель (только один)', 'error')
+                return redirect(url_for('task_assignments_list'))
         db.execute("""UPDATE task_assignment SET task_id=?, task_kind=?, employee_id=?,
                      share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (task_id,
@@ -3469,13 +3654,7 @@ def task_assignment_edit(id):
         WHERE s.is_deleted=0
     """):
         task_proj['subtask:' + str(s['id'])] = s['pid']
-    proj_emp = {}
-    for row in db.execute("""
-        SELECT pe.project_id, e.id, e.last_name, e.first_name
-        FROM project_employee pe JOIN employee e ON pe.employee_id=e.id
-        WHERE pe.is_deleted=0 AND e.is_deleted=0 ORDER BY e.last_name
-    """):
-        proj_emp.setdefault(row['project_id'], []).append(f'<option value="{row["id"]}">{row["last_name"]} {row["first_name"]}</option>')
+    proj_emp = _project_employee_options(db)
     db.close()
 
     task_options = ''.join([
@@ -4175,6 +4354,7 @@ def task_detail(id):
         JOIN task_status ts ON s.status_id=ts.id
         WHERE s.parent_task_id=? AND s.is_deleted=0 ORDER BY s.id
     """, (id,)).fetchall()
+    comments = db.execute("SELECT * FROM comment WHERE entity_type='task' AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (id,)).fetchall()
     db.close()
     info = [
         ('Задача', f'#{id}'),
@@ -4190,9 +4370,13 @@ def task_detail(id):
                   e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
     rows_sub = [[f'<a href="{url_for("subtask_detail", id=s["id"])}">#{s["id"]}</a>', s['description'][:60], s['prio'],
                  s['deadline'] or '-', f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["st"]}</span>'] for s in subtasks]
+    add_comment = f'<a href="{url_for("comment_create", entity_type="task", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
+    rows_c = [[c['created_at'], c['author'] or '-', c['text'],
+               f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     return _detail_page(f'Задача #{id}', info, [
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
         {'title': 'Подзадачи', 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус'], 'rows': rows_sub},
+        {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
     ])
 
 @app.route('/subtasks/<int:id>')
@@ -4215,6 +4399,7 @@ def subtask_detail(id):
         LEFT JOIN position_type pt ON e.position_type_id=pt.id
         WHERE ta.task_id=? AND ta.task_kind='subtask' AND ta.is_deleted=0
     """, (id,)).fetchall()
+    comments = db.execute("SELECT * FROM comment WHERE entity_type='subtask' AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (id,)).fetchall()
     db.close()
     info = [
         ('Подзадача', f'#{id}'),
@@ -4226,8 +4411,12 @@ def subtask_detail(id):
     ]
     rows_exec = [[f'<a href="{url_for("employee_detail", id=e["eid"])}">{e["last_name"]} {e["first_name"]}</a>',
                   e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
+    add_comment = f'<a href="{url_for("comment_create", entity_type="subtask", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
+    rows_c = [[c['created_at'], c['author'] or '-', c['text'],
+               f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     return _detail_page(f'Подзадача #{id}', info, [
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
+        {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
     ])
 
 @app.route('/stakeholders/<int:id>')
@@ -4770,6 +4959,100 @@ def database_delete(name):
     except OSError as e:
         flash(f'Ошибка удаления: {e}', 'error')
     return redirect(url_for('database_index'))
+
+#==================== КОММЕНТАРИИ ====================
+
+@app.route('/comments/create', methods=['GET', 'POST'])
+def comment_create():
+    db = get_db()
+    if request.method == 'POST':
+        db.execute("INSERT INTO comment (entity_type, entity_id, author, text) VALUES (?, ?, ?, ?)",
+                   (request.form['entity_type'], int(request.form['entity_id']),
+                    request.form.get('author') or None, request.form['text']))
+        db.commit()
+        db.close()
+        flash('Комментарий добавлен', 'success')
+        origin = request.form.get('origin')
+        if origin:
+            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
+        if request.form['entity_type'] == 'task':
+            return redirect(url_for('task_detail', id=int(request.form['entity_id'])))
+        return redirect(url_for('subtask_detail', id=int(request.form['entity_id'])))
+    etype = request.args.get('entity_type', 'task')
+    eid = request.args.get('entity_id')
+    origin = request.args.get('origin')
+    label = '—'
+    if etype == 'task' and eid:
+        row = db.execute("SELECT description FROM task WHERE id=? AND is_deleted=0", (int(eid),)).fetchone()
+        label = row[0] if row else '—'
+    elif etype == 'subtask' and eid:
+        row = db.execute("SELECT description FROM subtask WHERE id=? AND is_deleted=0", (int(eid),)).fetchone()
+        label = row[0] if row else '—'
+    pid = _entity_project_id(db, etype, eid) if eid else None
+    executors = []
+    if pid:
+        executors = db.execute("SELECT e.id, e.last_name, e.first_name FROM project_employee pe JOIN employee e ON pe.employee_id=e.id WHERE pe.project_id=? AND pe.is_deleted=0 AND e.is_deleted=0 ORDER BY e.last_name", (pid,)).fetchall()
+    author_options = '<option value="">— не указан —</option>' + ''.join(
+        [f'<option value="{e["last_name"]} {e["first_name"]}">{e["last_name"]} {e["first_name"]}</option>' for e in executors])
+    author_field = f'<select name="author">{author_options}</select>' if executors else '<input type="text" name="author">'
+    type_options = ''.join([f'<option value="{v}" {"selected" if v==etype else ""}">{t}</option>' for v,t in (('task','Задача'),('subtask','Подзадача'))])
+    if etype and eid:
+        schema_fields = (f'<input type="hidden" name="entity_type" value="{etype}">'
+                         f'<input type="hidden" name="entity_id" value="{eid}">')
+    else:
+        schema_fields = f'''
+            <div class="form-group">
+                <label>Тип</label>
+                <select name="entity_type" required>{type_options}</select>
+            </div>
+            <div class="form-group">
+                <label>ID задачи/подзадачи</label>
+                <input type="number" name="entity_id" required>
+            </div>'''
+    db.close()
+    cancel = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('tasks_list')
+    entity_title = ('Задача #' + eid if etype == 'task' and eid else ('Подзадача #' + eid if etype == 'subtask' and eid else '—'))
+    content = f'''
+    <div class="card">
+        <h2>Новый комментарий</h2>
+        <div class="comment" style="margin-bottom:12px;">
+            <strong>{entity_title}</strong><br>{html.escape(label)}
+        </div>
+        <form method="POST">
+            <input type="hidden" name="origin" value="{origin or ''}">
+            {schema_fields}
+            <div class="form-group">
+                <label>Автор (исполнитель проекта)</label>
+                {author_field}
+            </div>
+            <div class="form-group">
+                <label>Комментарий</label>
+                <textarea name="text" required></textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Добавить</button>
+            <a href="{cancel}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Новый комментарий', content=content)
+
+@app.route('/comments/delete/<int:id>')
+def comment_delete(id):
+    db = get_db()
+    c = db.execute("SELECT * FROM comment WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if c:
+        db.execute("UPDATE comment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+        db.commit()
+        origin = request.args.get('origin')
+        if origin:
+            db.close()
+            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
+        eid, etype = c['entity_id'], c['entity_type']
+        db.close()
+        return redirect(url_for('task_detail', id=eid) if etype == 'task' else url_for('subtask_detail', id=eid))
+    db.close()
+    flash('Комментарий не найден', 'error')
+    return redirect(url_for('tasks_list'))
 
 #==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 
