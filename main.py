@@ -1593,14 +1593,14 @@ def project_detail(id):
         children = sub_children.get(st['id'], [])
         asg = url_for('task_assignment_create', task_id=st['id'], task_kind='subtask', origin=id)
         edit_link = url_for('subtask_edit', id=st['id'], origin=id)
+        card_link = url_for('subtask_detail', id=st['id'])
         child_link = url_for('subtask_create', parent_subtask_id=st['id'], origin=id)
         del_link = url_for('subtask_delete', id=st['id'])
-        comments_html = _comments_html(db, 'subtask', st['id'], id)
         return f'''
             <details class="subtask" open>
                 <summary>
                     <span class="node-info">
-                        Подзадача #{st['id']}: {st['description'][:60]}
+                        <a href="{card_link}">Подзадача #{st['id']}</a>: {st['description'][:60]}
                         <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
                         <span class="node-meta">Приоритет: {st['priority_name']}</span>
                     </span>
@@ -1612,7 +1612,6 @@ def project_detail(id):
                     </span>
                 </summary>
                 <div class="node-body">
-                    {comments_html}
                     {st['description']}
                     {render_assignments_block('subtask', st['id'])}
                     {''.join([render_subtask(c) for c in children])}
@@ -1625,13 +1624,13 @@ def project_detail(id):
         asg = url_for('task_assignment_create', task_id=t['id'], task_kind='task', origin=id)
         subtask_link = url_for('subtask_create', parent_task_id=t['id'], origin=id)
         edit_link = url_for('task_edit', id=t['id'], origin=id)
+        card_link = url_for('task_detail', id=t['id'])
         del_link = url_for('task_delete', id=t['id'])
-        comments_html = _comments_html(db, 'task', t['id'], id)
         return f'''
             <details class="task" open>
                 <summary>
                     <span class="node-info">
-                        Задача #{t['id']}: {t['description'][:60]}
+                        <a href="{card_link}">Задача #{t['id']}</a>: {t['description'][:60]}
                         <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
                         <span class="node-meta">Приоритет: {t['priority_name']}</span>
                     </span>
@@ -1643,7 +1642,6 @@ def project_detail(id):
                     </span>
                 </summary>
                 <div class="node-body">
-                    {comments_html}
                     {t['description']}
                     {render_assignments_block('task', t['id'])}
                     {subtask_html}
@@ -3067,14 +3065,20 @@ def task_create():
     db = get_db()
     if request.method == 'POST':
         stage_id = request.form.get('stage_id')
+        req_id = request.form.get('requirement_id')
         if not stage_id:
             db.close()
             flash('Задача должна быть создана под этапом — выберите этап', 'error')
             origin = request.form.get('origin')
             return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('tasks_list'))
+        if not req_id:
+            db.close()
+            flash('Задача должна относиться к требованию — выберите требование', 'error')
+            origin = request.form.get('origin')
+            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('tasks_list'))
         db.execute("""INSERT INTO task (requirement_id, description, stage_id, priority_id, deadline, status_id)
                      VALUES (?, ?, ?, ?, ?, ?)""",
-                  (request.form.get('requirement_id') or None,
+                  (int(req_id),
                    request.form['description'],
                    int(stage_id),
                    int(request.form['priority_id']),
@@ -3106,7 +3110,7 @@ def task_create():
                     chosen = s
                     break
         pre_stage = str(chosen['id'])
-    req_options = '<option value="">Не выбрано</option>' + ''.join(
+    req_options = '<option value="">— выберите требование —</option>' + ''.join(
         [f'<option value="{r["id"]}">[{r["project_name"]}] {r["description"][:50]}</option>' for r in requirements])
     stage_options = '<option value="">— выберите этап —</option>' + ''.join(
         [f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_stage else ""}>[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
@@ -3121,7 +3125,7 @@ def task_create():
             <input type="hidden" name="origin" value="{origin or ''}">
             <div class="form-group">
                 <label>Требование</label>
-                <select name="requirement_id">{req_options}</select>
+                <select name="requirement_id" required>{req_options}</select>
             </div>
             <div class="form-group">
                 <label>Описание</label>
@@ -3155,13 +3159,18 @@ def task_edit(id):
     db = get_db()
     if request.method == 'POST':
         stage_id = request.form.get('stage_id')
+        req_id = request.form.get('requirement_id')
         if not stage_id:
             db.close()
             flash('Задача должна быть под этапом — выберите этап', 'error')
             return redirect(url_for('tasks_list'))
+        if not req_id:
+            db.close()
+            flash('Задача должна относиться к требованию — выберите требование', 'error')
+            return redirect(url_for('tasks_list'))
         db.execute("""UPDATE task SET requirement_id=?, description=?, stage_id=?,
                      priority_id=?, deadline=?, status_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-                  (request.form.get('requirement_id') or None,
+                  (int(req_id),
                    request.form['description'],
                    int(stage_id),
                    int(request.form['priority_id']),
@@ -3190,7 +3199,7 @@ def task_edit(id):
 
     origin = request.args.get('origin')
     cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('tasks_list')
-    req_options = '<option value="">Не выбрано</option>' + ''.join([
+    req_options = '<option value="">— выберите требование —</option>' + ''.join([
                                                                        f'<option value="{r["id"]}" {"selected" if r["id"] == task["requirement_id"] else ""}>[{r["project_name"]}] {r["description"][:50]}</option>'
                                                                        for r in requirements])
     stage_options = '<option value="">— выберите этап —</option>' + ''.join([
@@ -3210,7 +3219,7 @@ def task_edit(id):
             <input type="hidden" name="origin" value="{origin or ''}">
             <div class="form-group">
                 <label>Требование</label>
-                <select name="requirement_id">{req_options}</select>
+                <select name="requirement_id" required>{req_options}</select>
             </div>
             <div class="form-group">
                 <label>Описание</label>
@@ -4426,7 +4435,7 @@ def task_detail(id):
     db = get_db()
     t = db.execute("""
         SELECT t.*, pr.name prio, ts.name st, ts.color color, p.name pname, p.id pid, pst.name stype, ps.id stage_id,
-               r.description req_desc
+               r.id req_id, r.description req_desc
         FROM task t
         JOIN priority pr ON t.priority_id=pr.id
         JOIN task_status ts ON t.status_id=ts.id
@@ -4462,20 +4471,22 @@ def task_detail(id):
         ('Приоритет', t['prio']),
         ('Срок', t['deadline'] or '-'),
         ('Статус', f'<span class="badge" style="background: {t["color"] or "#95a5a6"}">{t["st"]}</span>'),
-        ('Требование', t['req_desc'] or '-'),
+        ('Требование', f'<a href="{url_for("requirement_detail", id=t["req_id"])}">{t["req_desc"]}</a>' if t['req_id'] else '-'),
     ]
     rows_exec = [[f'<a href="{url_for("employee_detail", id=e["eid"])}">{e["last_name"]} {e["first_name"]}</a>',
                   e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
     rows_sub = [[f'<a href="{url_for("subtask_detail", id=s["id"])}">#{s["id"]}</a>', s['description'][:60], s['prio'],
                  s['deadline'] or '-', f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["st"]}</span>'] for s in subtasks]
     add_comment = f'<a href="{url_for("comment_create", entity_type="task", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
+    add_subtask = f'<a href="{url_for("subtask_create", parent_task_id=id)}" class="btn btn-success">+ Подзадача</a>'
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
-    return _detail_page(f'Задача #{id}', info, [
+    add_req = f'<a href="{url_for("requirement_create", project_id=t["pid"])}" class="btn btn-success">+ Требование</a>' if t['pid'] else ''
+    return _detail_page(f'Задача #{id}', info, tables=[
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
-        {'title': 'Подзадачи', 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус'], 'rows': rows_sub},
+        {'title': 'Подзадачи ' + add_subtask, 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус'], 'rows': rows_sub},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
-    ])
+    ], actions=add_req)
 
 @app.route('/subtasks/<int:id>')
 def subtask_detail(id):
@@ -4510,10 +4521,12 @@ def subtask_detail(id):
     rows_exec = [[f'<a href="{url_for("employee_detail", id=e["eid"])}">{e["last_name"]} {e["first_name"]}</a>',
                   e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
     add_comment = f'<a href="{url_for("comment_create", entity_type="subtask", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
+    add_subtask = f'<a href="{url_for("subtask_create", parent_subtask_id=id)}" class="btn btn-success">+ Подзадача</a>'
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     return _detail_page(f'Подзадача #{id}', info, [
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
+        {'title': 'Вложенные подзадачи ' + add_subtask, 'headers': ['Действия'], 'rows': []},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
     ])
 
