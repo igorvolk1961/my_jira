@@ -4425,7 +4425,7 @@ def employee_detail(id):
 def task_detail(id):
     db = get_db()
     t = db.execute("""
-        SELECT t.*, pr.name prio, ts.name st, ts.color color, p.name pname, pst.name stype,
+        SELECT t.*, pr.name prio, ts.name st, ts.color color, p.name pname, p.id pid, pst.name stype, ps.id stage_id,
                r.description req_desc
         FROM task t
         JOIN priority pr ON t.priority_id=pr.id
@@ -4456,8 +4456,8 @@ def task_detail(id):
     db.close()
     info = [
         ('Задача', f'#{id}'),
-        ('Проект', t['pname'] or '-'),
-        ('Этап', t['stype'] or '-'),
+        ('Проект', f'<a href="{url_for("project_detail", id=t["pid"])}">{t["pname"]}</a>' if t['pid'] else '-'),
+        ('Этап', f'<a href="{url_for("project_stage_detail", id=t["stage_id"])}">{t["stype"]}</a>' if t['stage_id'] else '-'),
         ('Описание', t['description']),
         ('Приоритет', t['prio']),
         ('Срок', t['deadline'] or '-'),
