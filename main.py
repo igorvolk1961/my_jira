@@ -1980,7 +1980,7 @@ def requirements_list():
 def requirement_create():
     db = get_db()
     if request.method == 'POST':
-        db.execute("""INSERT INTO requirement (project_id, stakeholder_id, requirement_type_id, description, priority_id, acceptance_criteria)
+        cur = db.execute("""INSERT INTO requirement (project_id, stakeholder_id, requirement_type_id, description, priority_id, acceptance_criteria)
                      VALUES (?, ?, ?, ?, ?, ?)""",
                   (int(request.form['project_id']),
                    request.form.get('stakeholder_id') or None,
@@ -1988,12 +1988,19 @@ def requirement_create():
                    request.form['description'],
                    int(request.form['priority_id']),
                    request.form.get('acceptance_criteria')))
+        new_id = cur.lastrowid
+        task_id = request.form.get('task_id')
+        if task_id:
+            db.execute("UPDATE task SET requirement_id=? WHERE id=? AND is_deleted=0", (new_id, int(task_id)))
         db.commit()
         db.close()
         flash('Требование создано', 'success')
+        if task_id:
+            return redirect(url_for('task_detail', id=int(task_id)))
         return redirect(url_for('project_detail', id=int(request.form['project_id'])))
 
     pre_project = request.args.get('project_id')
+    pre_task = request.args.get('task_id')
     projects = db.execute("SELECT * FROM project WHERE is_deleted=0").fetchall()
     stakeholders = db.execute("SELECT * FROM stakeholder WHERE is_deleted=0").fetchall()
     req_types = db.execute("SELECT * FROM requirement_type WHERE is_deleted=0").fetchall()
@@ -2004,12 +2011,13 @@ def requirement_create():
     stakeholder_options = '<option value="">Не выбран</option>' + ''.join([f'<option value="{s["id"]}">{s["last_name"]} {s["first_name"]}</option>' for s in stakeholders])
     type_options = ''.join([f'<option value="{t["id"]}">{t["name"]}</option>' for t in req_types])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
-    cancel_url = url_for('project_detail', id=int(pre_project)) if pre_project else url_for('requirements_list')
+    cancel_url = url_for('task_detail', id=int(pre_task)) if pre_task else (url_for('project_detail', id=int(pre_project)) if pre_project else url_for('requirements_list'))
 
     content = f'''
     <div class="card">
         <h2>Новое требование</h2>
         <form method="POST">
+            <input type="hidden" name="task_id" value="{pre_task or ''}">
             <div class="form-group">
                 <label>Проект</label>
                 <select name="project_id" required>{project_options}</select>
@@ -3484,20 +3492,28 @@ def subtask_create():
         "SELECT ps.id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
-    db.close()
 
     pre_task = request.args.get('parent_task_id')
     pre_psub = request.args.get('parent_subtask_id')
     origin = request.args.get('origin')
     root_task = pre_task
+    pre_stage = None
     if pre_psub:
-        r = db.execute("SELECT parent_task_id FROM subtask WHERE id=? AND is_deleted=0", (int(pre_psub),)).fetchone()
-        root_task = str(r[0]) if r else pre_task
+        r = db.execute("SELECT parent_task_id, stage_id FROM subtask WHERE id=? AND is_deleted=0", (int(pre_psub),)).fetchone()
+        if r:
+            root_task = str(r[0])
+            pre_stage = r['stage_id']
+    elif pre_task:
+        r = db.execute("SELECT stage_id FROM task WHERE id=? AND is_deleted=0", (int(pre_task),)).fetchone()
+        if r:
+            pre_stage = r['stage_id']
+    db.close()
+
     task_options = ''.join([f'<option value="{t["id"]}" {"selected" if str(t["id"]) == root_task else ""}>{t["id"]}. {t["description"][:50]}</option>' for t in tasks])
     subtask_options = '<option value="">— нет, подзадача напрямую от задачи —</option>' + ''.join(
         [f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_psub else ""}>{s["id"]}. {s["description"][:50]}</option>' for s in subtasks])
     stage_options = '<option value="">Не выбран</option>' + ''.join(
-        [f'<option value="{s["id"]}">[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
+        [f'<option value="{s["id"]}" {"selected" if s["id"] == pre_stage else ""}>[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
     status_options = ''.join([f'<option value="{s["id"]}">{s["name"]}</option>' for s in statuses])
     cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('subtasks_list')
@@ -4622,7 +4638,7 @@ def task_detail(id):
     add_subtask = f'<a href="{url_for("subtask_create", parent_task_id=id)}" class="btn btn-success">+ Подзадача</a>'
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
-    add_req = f'<a href="{url_for("requirement_create", project_id=t["pid"])}" class="btn btn-success">+ Требование</a>' if t['pid'] else ''
+    add_req = f'<a href="{url_for("requirement_create", project_id=t["pid"], task_id=id)}" class="btn btn-success">+ Требование</a>' if t['pid'] else ''
     add_assign = f'<a href="{url_for("task_assignment_create", task_id=id, task_kind="task", origin=t["pid"])}" class="btn btn-warning">Назначить</a>' if t['pid'] else ''
     return _detail_page(f'Задача #{id}', info, tables=[
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
