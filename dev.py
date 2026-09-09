@@ -43,7 +43,7 @@ def smoke():
                                          'description': 'Требование', 'priority_id': '1'})
     c.post('/project_stages/create', data={'project_id': '1', 'stage_type_id': '1', 'status_id': '1'})
     c.post('/tasks/create', data={'requirement_id': '1', 'description': 'Задача', 'stage_id': '1',
-                                  'priority_id': '1', 'status_id': '1'})
+                                  'task_type_id': '1', 'priority_id': '1', 'status_id': '1'})
     c.post('/subtasks/create', data={'parent_task_id': '1', 'description': 'Подзадача',
                                      'priority_id': '1', 'status_id': '1'})
     c.post('/employees/create', data={'last_name': 'Сидоров', 'first_name': 'Иван',

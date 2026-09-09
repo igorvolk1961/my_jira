@@ -216,6 +216,15 @@ def init_db(path=None):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_deleted INTEGER DEFAULT 0
         );
+
+        -- Типы задач
+        CREATE TABLE IF NOT EXISTS task_type (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
         
         -- Задачи
         CREATE TABLE IF NOT EXISTS task (
@@ -223,6 +232,7 @@ def init_db(path=None):
             requirement_id INTEGER REFERENCES requirement(id) ON DELETE SET NULL,
             description TEXT NOT NULL,
             stage_id INTEGER REFERENCES project_stage(id),
+            task_type_id INTEGER REFERENCES task_type(id),
             priority_id INTEGER NOT NULL REFERENCES priority(id),
             deadline DATE,
             status_id INTEGER NOT NULL REFERENCES task_status(id),
@@ -336,6 +346,9 @@ def init_db(path=None):
     subcols = [r[1] for r in db.execute("PRAGMA table_info(subtask)").fetchall()]
     if 'parent_subtask_id' not in subcols:
         db.execute("ALTER TABLE subtask ADD COLUMN parent_subtask_id INTEGER REFERENCES subtask(id)")
+    tcols = [r[1] for r in db.execute("PRAGMA table_info(task)").fetchall()]
+    if 'task_type_id' not in tcols:
+        db.execute("ALTER TABLE task ADD COLUMN task_type_id INTEGER REFERENCES task_type(id)")
     try:
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_executor_per_subtask ON task_assignment(task_id) WHERE task_kind='subtask' AND is_deleted=0")
     except sqlite3.IntegrityError:
@@ -393,6 +406,12 @@ def init_db(path=None):
             ('Выполнена', 'green'), ('Отменена', 'red'), ('Заблокирована', 'orange')
         ]
         db.executemany("INSERT INTO task_status (name, color) VALUES (?, ?)", task_statuses)
+        
+        task_types = [
+            'Новый функционал', 'Исправление ошибки', 'Улучшение',
+            'Документирование', 'Тестирование'
+        ]
+        db.executemany("INSERT INTO task_type (name) VALUES (?)", [(t,) for t in task_types])
         
         db.commit()
     
@@ -623,6 +642,7 @@ BASE_TEMPLATE = '''
                 <a href="{{ url_for('stage_types_list') }}">Типы этапов</a>
                 <a href="{{ url_for('stage_statuses_list') }}">Статусы этапов</a>
                 <a href="{{ url_for('task_statuses_list') }}">Статусы задач</a>
+                <a href="{{ url_for('task_types_list') }}">Типы задач</a>
             </div>
         </div>
         <a href="{{ url_for('stakeholders_list') }}">Стейкхолдеры</a>
@@ -1524,12 +1544,13 @@ def project_detail(id):
 
     tasks = db.execute("""
         SELECT t.*, ps.id as stage_id, pr.name as priority_name,
-               ts.name as status_name, ts.color as status_color
+               ts.name as status_name, ts.color as status_color, tt.name as type_name
         FROM task t
         JOIN priority pr ON t.priority_id = pr.id
         JOIN task_status ts ON t.status_id = ts.id
         LEFT JOIN project_stage ps ON t.stage_id = ps.id
         LEFT JOIN requirement r ON t.requirement_id = r.id
+        LEFT JOIN task_type tt ON t.task_type_id = tt.id
         WHERE t.is_deleted=0 AND (ps.project_id=? OR r.project_id=?)
         ORDER BY t.id
     """, (id, id)).fetchall()
@@ -1559,7 +1580,7 @@ def project_detail(id):
             return
         ph = ','.join('?' * len(ids))
         rows = db.execute(f"""
-            SELECT ta.*, e.last_name, e.first_name
+            SELECT ta.*, e.id as eid, e.last_name, e.first_name
             FROM task_assignment ta JOIN employee e ON ta.employee_id = e.id
             WHERE ta.is_deleted=0 AND ta.task_kind=? AND ta.task_id IN ({ph})
         """, tuple([kind] + list(ids))).fetchall()
@@ -1583,7 +1604,7 @@ def project_detail(id):
     def render_assignees(lines):
         if not lines:
             return '<span class="muted">исполнители не назначены</span>'
-        items = [f'{a["last_name"]} {a["first_name"]} ({int(a["share"] * 100)}%)' for a in lines]
+        items = [f'<a href="{url_for("employee_detail", id=a["eid"])}">{a["last_name"]} {a["first_name"]}</a> ({int(a["share"] * 100)}%)' for a in lines]
         return 'Исполнители: ' + ', '.join(items)
 
     def render_assignments_block(kind, tid):
@@ -1596,13 +1617,16 @@ def project_detail(id):
         card_link = url_for('subtask_detail', id=st['id'])
         child_link = url_for('subtask_create', parent_subtask_id=st['id'], origin=id)
         del_link = url_for('subtask_delete', id=st['id'])
+        overdue = bool(st['deadline']) and str(st['deadline']) < date.today().isoformat() and st['status_name'] not in ('Выполнена', 'Отменена')
+        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
         return f'''
             <details class="subtask" open>
                 <summary>
                     <span class="node-info">
-                        <a href="{card_link}">Подзадача #{st['id']}</a>: {st['description'][:60]}
+                        <a href="{card_link}">Подзадача #{st['id']}</a>
                         <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
                         <span class="node-meta">Приоритет: {st['priority_name']}</span>
+                        <span class="node-meta" style="{deadline_style}">Срок: {st['deadline'] or '-'}</span>
                     </span>
                     <span class="node-actions">
                         <a class="btn btn-warning" href="{asg}">Назначить</a>
@@ -1612,7 +1636,6 @@ def project_detail(id):
                     </span>
                 </summary>
                 <div class="node-body">
-                    {st['description']}
                     {render_assignments_block('subtask', st['id'])}
                     {''.join([render_subtask(c) for c in children])}
                 </div>
@@ -1626,13 +1649,17 @@ def project_detail(id):
         edit_link = url_for('task_edit', id=t['id'], origin=id)
         card_link = url_for('task_detail', id=t['id'])
         del_link = url_for('task_delete', id=t['id'])
+        overdue = bool(t['deadline']) and str(t['deadline']) < date.today().isoformat() and t['status_name'] not in ('Выполнена', 'Отменена')
+        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
         return f'''
             <details class="task" open>
                 <summary>
                     <span class="node-info">
-                        <a href="{card_link}">Задача #{t['id']}</a>: {t['description'][:60]}
+                        <a href="{card_link}">Задача #{t['id']}</a>
                         <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
+                        <span class="node-meta">Тип: {t['type_name'] or '-'}</span>
                         <span class="node-meta">Приоритет: {t['priority_name']}</span>
+                        <span class="node-meta" style="{deadline_style}">Срок: {t['deadline'] or '-'}</span>
                     </span>
                     <span class="node-actions">
                         <a class="btn btn-warning" href="{asg}">Назначить</a>
@@ -1642,7 +1669,6 @@ def project_detail(id):
                     </span>
                 </summary>
                 <div class="node-body">
-                    {t['description']}
                     {render_assignments_block('task', t['id'])}
                     {subtask_html}
                 </div>
@@ -3009,19 +3035,106 @@ def task_status_delete(id):
     flash('Статус задачи удалён', 'success')
     return redirect(url_for('task_statuses_list'))
 
+#==================== ТИПЫ ЗАДАЧ ====================
+@app.route('/task_types')
+def task_types_list():
+    db = get_db()
+    types = db.execute("SELECT * FROM task_type WHERE is_deleted=0 ORDER BY id").fetchall()
+    rows = ''.join([f'''
+        <tr>
+            <td>{t['id']}</td>
+            <td>{t['name']}</td>
+            <td>
+                <a href="{url_for('task_type_edit', id=t['id'])}" class="btn btn-primary">Изменить</a>
+                <a href="{url_for('task_type_delete', id=t['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+            </td>
+        </tr>
+    ''' for t in types])
+    content = f'''
+    <div class="card">
+        <h2>Типы задач</h2>
+        <a href="{url_for('task_type_create')}" class="btn btn-success">+ Добавить тип</a>
+        <table>
+            <thead><tr><th>ID</th><th>Название</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </div>
+    '''
+    db.close()
+    return render_template_string(BASE_TEMPLATE, title='Типы задач', content=content)
+
+@app.route('/task_types/create', methods=['GET', 'POST'])
+def task_type_create():
+    db = get_db()
+    if request.method == 'POST':
+        cur = db.execute("INSERT INTO task_type (name) VALUES (?)", (request.form['name'],))
+        db.commit()
+        db.close()
+        flash('Тип задачи создан', 'success')
+        return redirect(url_for('task_types_list'))
+    content = f'''
+    <div class="card">
+        <h2>Новый тип задачи</h2>
+        <form method="POST">
+            <div class="form-group"><label>Название</label><input type="text" name="name" required></div>
+            <button type="submit" class="btn btn-success">Создать</button>
+            <a href="{url_for('task_types_list')}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    db.close()
+    return render_template_string(BASE_TEMPLATE, title='Новый тип задачи', content=content)
+
+@app.route('/task_types/edit/<int:id>', methods=['GET', 'POST'])
+def task_type_edit(id):
+    db = get_db()
+    if request.method == 'POST':
+        db.execute("UPDATE task_type SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (request.form['name'], id))
+        db.commit()
+        db.close()
+        flash('Тип задачи обновлён', 'success')
+        return redirect(url_for('task_types_list'))
+    t = db.execute("SELECT * FROM task_type WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if not t:
+        db.close()
+        flash('Тип задачи не найден', 'error')
+        return redirect(url_for('task_types_list'))
+    db.close()
+    content = f'''
+    <div class="card">
+        <h2>Редактировать тип задачи</h2>
+        <form method="POST">
+            <div class="form-group"><label>Название</label><input type="text" name="name" value="{t['name']}" required></div>
+            <button type="submit" class="btn btn-success">Сохранить</button>
+            <a href="{url_for('task_types_list')}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Редактировать тип задачи', content=content)
+
+@app.route('/task_types/delete/<int:id>')
+def task_type_delete(id):
+    db = get_db()
+    db.execute("UPDATE task_type SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.commit()
+    db.close()
+    flash('Тип задачи удалён', 'success')
+    return redirect(url_for('task_types_list'))
+
 #==================== ЗАДАЧИ ====================
 @app.route('/tasks')
 def tasks_list():
     db = get_db()
     tasks = db.execute("""
         SELECT t.*, r.description as req_desc, p.name as project_name, p.id as project_id,
-               ps.id as stage_id, pst.name as stage_name,
+               ps.id as stage_id, pst.name as stage_name, tt.name as type_name,
                pr.name as priority_name, ts.name as status_name, ts.color as status_color
         FROM task t
         LEFT JOIN requirement r ON t.requirement_id = r.id
         LEFT JOIN project_stage ps ON t.stage_id = ps.id
         LEFT JOIN project_stage_type pst ON ps.stage_type_id = pst.id
         LEFT JOIN project p ON p.id = COALESCE(ps.project_id, r.project_id)
+        LEFT JOIN task_type tt ON t.task_type_id = tt.id
         JOIN priority pr ON t.priority_id = pr.id
         JOIN task_status ts ON t.status_id = ts.id
         WHERE t.is_deleted=0
@@ -3033,6 +3146,7 @@ def tasks_list():
             <td>{t['id']}</td>
             <td>{f'<a href="{url_for("project_detail", id=t["project_id"])}">{t["project_name"]}</a>' if t['project_id'] else '-'}</td>
             <td>{t['description'][:40]}...</td>
+            <td>{t['type_name'] or '-'}</td>
             <td>{f'<a href="{url_for("project_stage_detail", id=t["stage_id"])}">{t["stage_name"]}</a>' if t['stage_id'] else '-'}</td>
             <td>{t['priority_name']}</td>
             <td>{t['deadline'] or '-'}</td>
@@ -3051,7 +3165,7 @@ def tasks_list():
         <a href="{url_for('task_create')}" class="btn btn-success">+ Добавить задачу</a>
         <table>
             <thead>
-                <tr><th>ID</th><th>Проект</th><th>Описание</th><th>Этап</th><th>Приоритет</th><th>Срок</th><th>Статус</th><th>Действия</th></tr>
+                <tr><th>ID</th><th>Проект</th><th>Описание</th><th>Тип</th><th>Этап</th><th>Приоритет</th><th>Срок</th><th>Статус</th><th>Действия</th></tr>
             </thead>
             <tbody>{rows}</tbody>
         </table>
@@ -3066,6 +3180,7 @@ def task_create():
     if request.method == 'POST':
         stage_id = request.form.get('stage_id')
         req_id = request.form.get('requirement_id')
+        ttype_id = request.form.get('task_type_id')
         if not stage_id:
             db.close()
             flash('Задача должна быть создана под этапом — выберите этап', 'error')
@@ -3076,11 +3191,17 @@ def task_create():
             flash('Задача должна относиться к требованию — выберите требование', 'error')
             origin = request.form.get('origin')
             return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('tasks_list'))
-        db.execute("""INSERT INTO task (requirement_id, description, stage_id, priority_id, deadline, status_id)
-                     VALUES (?, ?, ?, ?, ?, ?)""",
+        if not ttype_id:
+            db.close()
+            flash('Выберите тип задачи', 'error')
+            origin = request.form.get('origin')
+            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('tasks_list'))
+        db.execute("""INSERT INTO task (requirement_id, description, stage_id, task_type_id, priority_id, deadline, status_id)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                   (int(req_id),
                    request.form['description'],
                    int(stage_id),
+                   int(ttype_id),
                    int(request.form['priority_id']),
                    request.form.get('deadline') or None,
                    int(request.form['status_id'])))
@@ -3089,7 +3210,7 @@ def task_create():
         flash('Задача создана', 'success')
         origin = request.form.get('origin')
         if origin:
-            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
+            return redirect(url_for('project_stage_detail', id=int(stage_id)))
         return redirect(url_for('tasks_list'))
 
     requirements = db.execute(
@@ -3098,6 +3219,7 @@ def task_create():
         "SELECT ps.id, ps.project_id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
+    task_types = db.execute("SELECT * FROM task_type WHERE is_deleted=0").fetchall()
     db.close()
 
     pre_stage = request.args.get('stage_id')
@@ -3116,6 +3238,7 @@ def task_create():
         [f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_stage else ""}>[{s["project_name"]}] {s["type_name"]}</option>' for s in stages])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
     status_options = ''.join([f'<option value="{s["id"]}">{s["name"]}</option>' for s in statuses])
+    task_type_options = ''.join([f'<option value="{tt["id"]}">{tt["name"]}</option>' for tt in task_types])
     cancel_url = url_for('project_detail', id=int(origin), tab='stages') if origin else url_for('tasks_list')
 
     content = f'''
@@ -3130,6 +3253,10 @@ def task_create():
             <div class="form-group">
                 <label>Описание</label>
                 <textarea name="description" required></textarea>
+            </div>
+            <div class="form-group">
+                <label>Тип задачи</label>
+                <select name="task_type_id" required>{task_type_options}</select>
             </div>
             <div class="form-group">
                 <label>Этап проекта</label>
@@ -3168,11 +3295,16 @@ def task_edit(id):
             db.close()
             flash('Задача должна относиться к требованию — выберите требование', 'error')
             return redirect(url_for('tasks_list'))
-        db.execute("""UPDATE task SET requirement_id=?, description=?, stage_id=?,
+        if not request.form.get('task_type_id'):
+            db.close()
+            flash('Выберите тип задачи', 'error')
+            return redirect(url_for('tasks_list'))
+        db.execute("""UPDATE task SET requirement_id=?, description=?, stage_id=?, task_type_id=?,
                      priority_id=?, deadline=?, status_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (int(req_id),
                    request.form['description'],
                    int(stage_id),
+                   int(request.form['task_type_id']),
                    int(request.form['priority_id']),
                    request.form.get('deadline') or None,
                    int(request.form['status_id']), id))
@@ -3195,6 +3327,7 @@ def task_edit(id):
         "SELECT ps.id, p.name as project_name, pst.name as type_name FROM project_stage ps JOIN project p ON ps.project_id=p.id JOIN project_stage_type pst ON ps.stage_type_id=pst.id WHERE ps.is_deleted=0").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     statuses = db.execute("SELECT * FROM task_status WHERE is_deleted=0").fetchall()
+    task_types = db.execute("SELECT * FROM task_type WHERE is_deleted=0").fetchall()
     db.close()
 
     origin = request.args.get('origin')
@@ -3211,6 +3344,8 @@ def task_edit(id):
     status_options = ''.join(
         [f'<option value="{s["id"]}" {"selected" if s["id"] == task["status_id"] else ""}>{s["name"]}</option>' for s in
          statuses])
+    task_type_options = ''.join(
+        [f'<option value="{tt["id"]}" {"selected" if tt["id"] == task["task_type_id"] else ""}>{tt["name"]}</option>' for tt in task_types])
 
     content = f'''
     <div class="card">
@@ -3224,6 +3359,10 @@ def task_edit(id):
             <div class="form-group">
                 <label>Описание</label>
                 <textarea name="description" required>{task['description']}</textarea>
+            </div>
+            <div class="form-group">
+                <label>Тип задачи</label>
+                <select name="task_type_id" required>{task_type_options}</select>
             </div>
             <div class="form-group">
                 <label>Этап проекта</label>
@@ -4435,13 +4574,14 @@ def task_detail(id):
     db = get_db()
     t = db.execute("""
         SELECT t.*, pr.name prio, ts.name st, ts.color color, p.name pname, p.id pid, pst.name stype, ps.id stage_id,
-               r.id req_id, r.description req_desc
+               r.id req_id, r.description req_desc, tt.name type_name
         FROM task t
         JOIN priority pr ON t.priority_id=pr.id
         JOIN task_status ts ON t.status_id=ts.id
         LEFT JOIN project_stage ps ON t.stage_id=ps.id
         LEFT JOIN project_stage_type pst ON ps.stage_type_id=pst.id
         LEFT JOIN requirement r ON t.requirement_id=r.id
+        LEFT JOIN task_type tt ON t.task_type_id=tt.id
         LEFT JOIN project p ON p.id=COALESCE(ps.project_id, (SELECT project_id FROM requirement WHERE id=t.requirement_id))
         WHERE t.id=? AND t.is_deleted=0
     """, (id,)).fetchone()
@@ -4468,6 +4608,7 @@ def task_detail(id):
         ('Проект', f'<a href="{url_for("project_detail", id=t["pid"])}">{t["pname"]}</a>' if t['pid'] else '-'),
         ('Этап', f'<a href="{url_for("project_stage_detail", id=t["stage_id"])}">{t["stype"]}</a>' if t['stage_id'] else '-'),
         ('Описание', t['description']),
+        ('Тип', t['type_name'] or '-'),
         ('Приоритет', t['prio']),
         ('Срок', t['deadline'] or '-'),
         ('Статус', f'<span class="badge" style="background: {t["color"] or "#95a5a6"}">{t["st"]}</span>'),
@@ -4482,11 +4623,12 @@ def task_detail(id):
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     add_req = f'<a href="{url_for("requirement_create", project_id=t["pid"])}" class="btn btn-success">+ Требование</a>' if t['pid'] else ''
+    add_assign = f'<a href="{url_for("task_assignment_create", task_id=id, task_kind="task", origin=t["pid"])}" class="btn btn-warning">Назначить</a>' if t['pid'] else ''
     return _detail_page(f'Задача #{id}', info, tables=[
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
         {'title': 'Подзадачи ' + add_subtask, 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус'], 'rows': rows_sub},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
-    ], actions=add_req)
+    ], actions=add_req + ' ' + add_assign)
 
 @app.route('/subtasks/<int:id>')
 def subtask_detail(id):
@@ -4509,6 +4651,7 @@ def subtask_detail(id):
         WHERE ta.task_id=? AND ta.task_kind='subtask' AND ta.is_deleted=0
     """, (id,)).fetchall()
     comments = db.execute("SELECT * FROM comment WHERE entity_type='subtask' AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (id,)).fetchall()
+    pid = _entity_project_id(db, 'subtask', id)
     db.close()
     info = [
         ('Подзадача', f'#{id}'),
@@ -4522,13 +4665,14 @@ def subtask_detail(id):
                   e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
     add_comment = f'<a href="{url_for("comment_create", entity_type="subtask", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
     add_subtask = f'<a href="{url_for("subtask_create", parent_subtask_id=id)}" class="btn btn-success">+ Подзадача</a>'
+    add_assign = f'<a href="{url_for("task_assignment_create", task_id=id, task_kind="subtask", origin=pid)}" class="btn btn-warning">Назначить</a>' if pid else ''
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     return _detail_page(f'Подзадача #{id}', info, [
         {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
         {'title': 'Вложенные подзадачи ' + add_subtask, 'headers': ['Действия'], 'rows': []},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
-    ])
+    ], actions=add_assign)
 
 @app.route('/stakeholders/<int:id>')
 def stakeholder_detail(id):
@@ -4651,8 +4795,9 @@ def project_stage_detail(id):
     rows = [[f'<a href="{url_for("task_detail", id=t["id"])}">#{t["id"]}</a>', t['description'][:60], t['prio'],
              t['deadline'] or '-', f'<span class="badge" style="background: {t["color"] or "#95a5a6"}">{t["st"]}</span>',
              t['executors'] or 'не назначено'] for t in tasks]
+    add_task = f'<a href="{url_for("task_create", stage_id=id, origin=st["project_id"])}" class="btn btn-success">+ Задача</a>'
     return _detail_page('Этап: ' + st['type_name'], info, [
-        {'title': 'Задачи этапа', 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус', 'Исполнители'], 'rows': rows},
+        {'title': 'Задачи этапа ' + add_task, 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус', 'Исполнители'], 'rows': rows},
     ])
 
 @app.route('/task_assignments/<int:id>')
