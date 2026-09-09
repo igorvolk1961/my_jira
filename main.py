@@ -355,11 +355,10 @@ def init_db(path=None):
         pass
 
     # Типы задач: отдельное наполнение (для существующих БД, где основные справочники уже есть)
-    if db.execute("SELECT COUNT(*) FROM task_type").fetchone()[0] == 0:
-        db.executemany("INSERT INTO task_type (name) VALUES (?)",
-                       [(t,) for t in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
-                                       'Документирование', 'Тестирование')])
-        db.commit()
+    for ttype in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
+                  'Документирование', 'Тестирование', 'Код-ревью'):
+        db.execute("INSERT OR IGNORE INTO task_type (name) VALUES (?)", (ttype,))
+    db.commit()
     
     # Начальное заполнение справочников
     if db.execute("SELECT COUNT(*) FROM priority").fetchone()[0] == 0:
