@@ -442,6 +442,49 @@ def sync_stakeholder_for_employee(db, eid, active):
         for ex in linked:
             db.execute("UPDATE stakeholder SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (ex['id'],))
 
+def _subtask_ancestors(db, sid):
+    """Предки подзадачи: (родительская задача, цепочка родительских подзадач)."""
+    res = []
+    cur = db.execute("SELECT parent_task_id, parent_subtask_id FROM subtask WHERE id=? AND is_deleted=0", (sid,)).fetchone()
+    if not cur:
+        return res
+    res.append(('task', cur['parent_task_id']))
+    p = cur['parent_subtask_id']
+    while p:
+        res.append(('subtask', p))
+        pc = db.execute("SELECT parent_subtask_id FROM subtask WHERE id=? AND is_deleted=0", (p,)).fetchone()
+        p = pc['parent_subtask_id'] if pc else None
+    return res
+
+def _covered_for_employee(db, emp_id):
+    """Позиции (kind, id), где сотрудник занят в подзадаче, поэтому его занятость в предке не учитывается."""
+    covered = set()
+    for r in db.execute("SELECT task_id FROM task_assignment WHERE employee_id=? AND task_kind='subtask' AND is_deleted=0", (emp_id,)):
+        for anc in _subtask_ancestors(db, r['task_id']):
+            covered.add(anc)
+    return covered
+
+def _employee_effective_load(db, emp_id, exclude_assignment_id=0):
+    covered = _covered_for_employee(db, emp_id)
+    rows = db.execute("SELECT task_id, task_kind, share FROM task_assignment WHERE employee_id=? AND is_deleted=0 AND id<>?",
+                      (emp_id, exclude_assignment_id)).fetchall()
+    return sum(r['share'] for r in rows if (r['task_kind'], r['task_id']) not in covered)
+
+def _projected_load_after(db, emp_id, kind, task_id, new_share, exclude_assignment_id=0):
+    """Загрузка после добавления назначения: если новое — подзадача, её предки исключаются (подзадача покрывает родителя).
+    Уже перекрытые предки существующих подзадач тоже исключаются."""
+    anc = set(_subtask_ancestors(db, task_id)) if kind == 'subtask' else set()
+    rows = db.execute("SELECT task_id, task_kind, share FROM task_assignment WHERE employee_id=? AND is_deleted=0 AND id<>?",
+                      (emp_id, exclude_assignment_id)).fetchall()
+    cov = _covered_for_employee(db, emp_id)
+    total = sum(r['share'] for r in rows
+                if (r['task_kind'], r['task_id']) not in anc and (r['task_kind'], r['task_id']) not in cov)
+    return total + new_share
+
+def _employee_load_excluding(db, emp_id, exclude_assignment_id=0):
+    return db.execute("SELECT COALESCE(SUM(share),0) FROM task_assignment WHERE employee_id=? AND is_deleted=0 AND id<>?",
+                      (emp_id, exclude_assignment_id)).fetchone()[0]
+
 def _entity_project_id(db, etype, eid):
     if etype == 'task':
         r = db.execute("SELECT COALESCE(ps.project_id, r.project_id) pid FROM task t LEFT JOIN project_stage ps ON t.stage_id=ps.id LEFT JOIN requirement r ON t.requirement_id=r.id WHERE t.id=? AND t.is_deleted=0", (eid,)).fetchone()
@@ -1524,6 +1567,18 @@ def project_detail(id):
             assignments.setdefault((kind, a['task_id']), []).append(a)
     collect_assignments('task', task_ids)
     collect_assignments('subtask', [s['id'] for s in subtasks])
+
+    # Сотрудник, занятый в подзадаче, не показывается как исполнитель родительской задачи/подзадачи
+    covered_by_emp = {}
+    for (k, eidkey), rows in assignments.items():
+        for a in rows:
+            emp = a['employee_id']
+            if emp not in covered_by_emp:
+                covered_by_emp[emp] = _covered_for_employee(db, emp)
+    def _not_covered(k, tid, emp):
+        return (k, tid) not in covered_by_emp.get(emp, set())
+    assignments = {(k, tid): [a for a in rows if _not_covered(k, tid, a['employee_id'])]
+                   for (k, tid), rows in assignments.items()}
 
     def render_assignees(lines):
         if not lines:
@@ -3486,20 +3541,30 @@ def task_assignment_create():
                 db.close()
                 flash('Исполнитель не назначен на проект задачи', 'error')
                 return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+        new_share = float(request.form['share'])
         if kind == 'subtask':
             existing = db.execute("SELECT id FROM task_assignment WHERE task_id=? AND task_kind='subtask' AND is_deleted=0", (task_id,)).fetchone()
-            if existing:
-                db.execute("UPDATE task_assignment SET employee_id=?, share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (emp_id, float(request.form['share']), existing['id']))
-                db.commit()
-                db.close()
-                flash('Исполнитель подзадачи заменён (у подзадачи один исполнитель)', 'success')
-                return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+            exclude_id = existing['id'] if existing else 0
+        else:
+            existing = None
+            exclude_id = 0
+        cur_load = _projected_load_after(db, emp_id, kind, task_id, new_share, exclude_id)
+        if cur_load > 1.0 + 1e-9:
+            db.close()
+            flash(f'Суммарная загрузка сотрудника не может превышать 100% ({round(cur_load * 100)}%)', 'error')
+            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+        if kind == 'subtask' and existing:
+            db.execute("UPDATE task_assignment SET employee_id=?, share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (emp_id, new_share, existing['id']))
+            db.commit()
+            db.close()
+            flash('Исполнитель подзадачи заменён (у подзадачи один исполнитель)', 'success')
+            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
         db.execute("""INSERT INTO task_assignment (task_id, task_kind, employee_id, share)
                      VALUES (?, ?, ?, ?)""",
                   (task_id,
                    kind,
                    emp_id,
-                   float(request.form['share'])))
+                   new_share))
         db.commit()
         db.close()
         flash('Назначение создано', 'success')
@@ -3526,9 +3591,16 @@ def task_assignment_create():
     """):
         task_proj['subtask:' + str(s['id'])] = s['pid']
     proj_emp = _project_employee_options(db)
+    emp_count = {}
+    for e in employees:
+        cov = _covered_for_employee(db, e['id'])
+        cnt = db.execute("SELECT task_id, task_kind FROM task_assignment WHERE employee_id=? AND is_deleted=0", (e['id'],)).fetchall()
+        eff = [a for a in cnt if (a['task_kind'], a['task_id']) not in cov]
+        emp_count[str(e['id'])] = len(eff)
     db.close()
     task_proj_json = json.dumps({k: (str(v) if v else '') for k, v in task_proj.items()})
     proj_emp_json = json.dumps({str(k): ''.join(v) for k, v in proj_emp.items()})
+    emp_count_json = json.dumps(emp_count)
 
     pre_task = request.args.get('task_id')
     pre_kind = request.args.get('task_kind', 'task')
@@ -3562,7 +3634,7 @@ def task_assignment_create():
             </div>
             <div class="form-group">
                 <label>Сотрудник</label>
-                <select name="employee_id" required>{employee_options}</select>
+                <select name="employee_id" required onchange="setShareDefault()">{employee_options}</select>
             </div>
             <div class="form-group">
                 <label>Доля (0.0 - 1.0)</label>
@@ -3575,6 +3647,7 @@ def task_assignment_create():
     <script>
     var taskProject = {task_proj_json};
     var projEmployees = {proj_emp_json};
+    var empCount = {emp_count_json};
     function toggleTaskSelect(kind) {{
         document.getElementById('task_select').style.display = kind==='task' ? 'block' : 'none';
         document.getElementById('subtask_select').style.display = kind==='subtask' ? 'block' : 'none';
@@ -3590,6 +3663,13 @@ def task_assignment_create():
         empSel.innerHTML = opts;
         var has = Array.prototype.some.call(empSel.options, function(o) {{ return o.value === cur; }});
         if (cur) {{ empSel.value = has ? cur : ''; }}
+        setShareDefault();
+    }}
+    function setShareDefault() {{
+        var empSel = document.querySelector('select[name=employee_id]');
+        var shareSel = document.querySelector('input[name=share]');
+        var cnt = empCount[empSel.value] || 0;
+        if (empSel.value) {{ shareSel.value = ((1 / (cnt + 1)) * 100 / 100).toFixed(2); }}
     }}
     setEmployees();
     </script>
@@ -3619,12 +3699,18 @@ def task_assignment_edit(id):
                 db.close()
                 flash('У подзадачи уже есть исполнитель (только один)', 'error')
                 return redirect(url_for('task_assignments_list'))
+        new_share = float(request.form['share'])
+        cur_load = _projected_load_after(db, emp_id, kind, task_id, new_share, id)
+        if cur_load > 1.0 + 1e-9:
+            db.close()
+            flash(f'Суммарная загрузка сотрудника не может превышать 100% ({round(cur_load * 100)}%)', 'error')
+            return redirect(url_for('task_assignments_list'))
         db.execute("""UPDATE task_assignment SET task_id=?, task_kind=?, employee_id=?,
                      share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (task_id,
                    kind,
                    emp_id,
-                   float(request.form['share']), id))
+                   new_share, id))
         db.commit()
         db.close()
         flash('Назначение обновлено', 'success')
@@ -3917,7 +4003,7 @@ def report_projects():
         GROUP BY pr.id ORDER BY pr.weight
     """).fetchall()
     progress = db.execute("""
-        SELECT p.name,
+        SELECT p.id, p.name,
             (SELECT COUNT(*) FROM project_stage ps WHERE ps.project_id=p.id AND ps.is_deleted=0) stages,
             (SELECT COUNT(*) FROM project_stage ps JOIN project_stage_status pss ON ps.status_id=pss.id
                 WHERE ps.project_id=p.id AND ps.is_deleted=0 AND pss.name='Завершён') stages_done,
@@ -3946,7 +4032,8 @@ def report_projects():
     for p in progress:
         t_pct = round(p['tasks_done'] / p['tasks'] * 100) if p['tasks'] else 0
         s_pct = round(p['stages_done'] / p['stages'] * 100) if p['stages'] else 0
-        rows2.append([p['name'], f"{p['stages_done']}/{p['stages']}",
+        rows2.append([f'<a href="{url_for("project_detail", id=p["id"])}">{p["name"]}</a>',
+                      f"{p['stages_done']}/{p['stages']}",
                       f"{p['tasks_done']}/{p['tasks']}", f"{t_pct}%", f"{s_pct}%"])
     return _report_page('Отчёт: Проекты', cards, [
         {'title': 'Проекты по приоритетам', 'headers': ['Приоритет', 'Вес', 'Кол-во', 'Стоимость'], 'rows': rows1},
@@ -3992,7 +4079,7 @@ def report_employees():
     """).fetchone()[0]
     emp_assigned = db.execute("SELECT COUNT(DISTINCT employee_id) FROM task_assignment WHERE is_deleted=0").fetchone()[0]
     load = db.execute("""
-        SELECT e.last_name, e.first_name, pt.name pos, es.name st, es.is_available av,
+        SELECT e.id, e.last_name, e.first_name, pt.name pos, es.name st, es.is_available av,
                (SELECT COUNT(*) FROM task_assignment ta WHERE ta.employee_id=e.id AND ta.is_deleted=0) acnt,
                COALESCE((SELECT SUM(ta.share) FROM task_assignment ta WHERE ta.employee_id=e.id AND ta.is_deleted=0), 0) lshare
         FROM employee e
@@ -4010,13 +4097,14 @@ def report_employees():
         WHERE pt.is_deleted=0
         GROUP BY pt.id ORDER BY pt.name
     """).fetchall()
+    eff = {l['id']: _employee_effective_load(db, l['id']) for l in load}
     db.close()
-    overloaded = sum(1 for l in load if l['lshare'] > 1.0)
+    overloaded = sum(1 for l in load if eff[l['id']] > 1.0)
     cards = [('Всего сотрудников', emp_total, '#2c3e50'),
              ('Доступно', emp_avail, '#27ae60'),
              ('Заняты в задачах', emp_assigned, '#2c3e50'),
              ('Перегружены (>100%)', overloaded, '#e74c3c')]
-    rows = [[l['last_name'], l['first_name'], l['pos'], l['st'], l['acnt'], f"{round(l['lshare'] * 100)}%"] for l in load]
+    rows = [[f'<a href="{url_for("employee_detail", id=l["id"])}">{l["last_name"]} {l["first_name"]}</a>', l['pos'], l['st'], l['acnt'], f"{round(eff[l['id']] * 100)}%"] for l in load]
     rows2 = [[p['name'], p['cnt'], p['avail']] for p in by_pos]
     return _report_page('Отчёт: Сотрудники', cards, [
         {'title': 'Загрузка сотрудников', 'headers': ['Фамилия', 'Имя', 'Должность', 'Статус', 'Назначений', 'Загрузка %'], 'rows': rows},
@@ -4036,7 +4124,7 @@ def report_requirements():
         WHERE r.is_deleted=0 AND EXISTS (SELECT 1 FROM task t WHERE t.requirement_id=r.id AND t.is_deleted=0)
     """).fetchone()[0]
     by_proj = db.execute("""
-        SELECT p.name, COUNT(r.id) total,
+        SELECT p.id, p.name, COUNT(r.id) total,
                COALESCE(SUM(CASE WHEN r.acceptance_criteria IS NOT NULL AND r.acceptance_criteria <> '' THEN 1 ELSE 0 END), 0) crit,
                COALESCE(SUM(CASE WHEN EXISTS (SELECT 1 FROM task t WHERE t.requirement_id=r.id AND t.is_deleted=0) THEN 1 ELSE 0 END), 0) impl
         FROM project p LEFT JOIN requirement r ON r.project_id=p.id AND r.is_deleted=0
@@ -4057,7 +4145,7 @@ def report_requirements():
              ('С критерием проверки', req_criteria, '#2c3e50'),
              ('Реализовано (есть задачи)', req_impl, '#27ae60'),
              ('Без задач', req_total - req_impl, '#e74c3c')]
-    rows = [[p['name'], p['total'], p['crit'], p['impl'], p['total'] - p['impl']] for p in by_proj]
+    rows = [[f'<a href="{url_for("project_detail", id=p["id"])}">{p["name"]}</a>', p['total'], p['crit'], p['impl'], p['total'] - p['impl']] for p in by_proj]
     rows2 = [[t['name'], t['cnt']] for t in by_type]
     rows3 = [[t['name'], t['cnt']] for t in by_prio]
     return _report_page('Отчёт: Требования', cards, [
@@ -4083,7 +4171,7 @@ def report_stages():
         WHERE ps.is_deleted=0 AND ps.planned_end < date('now') AND pss.name NOT IN ('Завершён', 'Отменён')
     """).fetchone()[0]
     by_proj = db.execute("""
-        SELECT p.name, COUNT(ps.id) total,
+        SELECT p.id, p.name, COUNT(ps.id) total,
                SUM(CASE WHEN pss.name='Завершён' THEN 1 ELSE 0 END) done,
                SUM(CASE WHEN pss.name='В работе' THEN 1 ELSE 0 END) work,
                SUM(CASE WHEN ps.planned_end < date('now') AND pss.name NOT IN ('Завершён', 'Отменён') THEN 1 ELSE 0 END) over
@@ -4097,7 +4185,7 @@ def report_stages():
              ('В работе', st_work, '#3498db'),
              ('Завершено', st_done, '#27ae60'),
              ('Просрочено', st_over, '#e74c3c')]
-    rows = [[p['name'], p['total'], p['done'], p['work'], p['over']] for p in by_proj]
+    rows = [[f'<a href="{url_for("project_detail", id=p["id"])}">{p["name"]}</a>', p['total'], p['done'], p['work'], p['over']] for p in by_proj]
     return _report_page('Отчёт: Этапы', cards, [
         {'title': 'Этапы по проектам', 'headers': ['Проект', 'Всего', 'Завершено', 'В работе', 'Просрочено'], 'rows': rows},
     ])
@@ -4133,7 +4221,8 @@ def report_tasks():
         WHERE pr.is_deleted=0 GROUP BY pr.id ORDER BY pr.weight
     """).fetchall()
     noexec_list = db.execute("""
-        SELECT t.id, p.name pname, pst.name stype, t.description, pr.name prio, ts.name st
+        SELECT t.id, t.description, pr.name prio, ts.name st,
+               p.id pid, p.name pname, ps.id stage_id, pst.name stype
         FROM task t
         JOIN priority pr ON t.priority_id=pr.id
         JOIN task_status ts ON t.status_id=ts.id
@@ -4151,7 +4240,10 @@ def report_tasks():
              ('Без исполнителя', t_noexec, '#f39c12')]
     rows = [[f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["name"]}</span>', s['cnt']] for s in by_status]
     rows2 = [[t['name'], t['cnt']] for t in by_prio]
-    rows3 = [[t['id'], t['pname'] or '-', t['stype'] or '-', t['description'][:60], t['prio'], t['st']] for t in noexec_list]
+    rows3 = [[f'<a href="{url_for("task_detail", id=t["id"])}">#{t["id"]}</a>',
+              f'<a href="{url_for("project_detail", id=t["pid"])}">{t["pname"]}</a>' if t['pid'] else '-',
+              f'<a href="{url_for("project_stage_detail", id=t["stage_id"])}">{t["stype"]}</a>' if t['stage_id'] else '-',
+              t['description'][:60], t['prio'], t['st']] for t in noexec_list]
     return _report_page('Отчёт: Задачи', cards, [
         {'title': 'По статусам', 'headers': ['Статус', 'Кол-во'], 'rows': rows},
         {'title': 'По приоритетам', 'headers': ['Приоритет', 'Кол-во'], 'rows': rows2},
@@ -4184,7 +4276,7 @@ def report_subtasks():
         WHERE ts.is_deleted=0 GROUP BY ts.id ORDER BY ts.id
     """).fetchall()
     noexec_list = db.execute("""
-        SELECT s.id, t.description parent, s.description, pr.name prio, ts.name st
+        SELECT s.id, t.id parent_id, t.description parent, s.description, pr.name prio, ts.name st
         FROM subtask s
         JOIN task t ON s.parent_task_id=t.id
         JOIN priority pr ON s.priority_id=pr.id
@@ -4199,7 +4291,9 @@ def report_subtasks():
              ('Просрочено', s_over, '#e74c3c'),
              ('Без исполнителя', s_noexec, '#f39c12')]
     rows = [[f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["name"]}</span>', s['cnt']] for s in by_status]
-    rows2 = [[s['id'], s['parent'][:50], s['description'][:50], s['prio'], s['st']] for s in noexec_list]
+    rows2 = [[f'<a href="{url_for("subtask_detail", id=s["id"])}">#{s["id"]}</a>',
+              f'<a href="{url_for("task_detail", id=s["parent_id"])}">{s["parent"][:50]}</a>',
+              s['description'][:50], s['prio'], s['st']] for s in noexec_list]
     return _report_page('Отчёт: Подзадачи', cards, [
         {'title': 'По статусам', 'headers': ['Статус', 'Кол-во'], 'rows': rows},
         {'title': 'Подзадачи без исполнителя', 'headers': ['ID', 'Родительская задача', 'Описание', 'Приоритет', 'Статус'], 'rows': rows2},
@@ -4212,7 +4306,7 @@ def report_assignments():
     a_task = db.execute("SELECT COUNT(*) FROM task_assignment WHERE is_deleted=0 AND task_kind='task'").fetchone()[0]
     a_sub = db.execute("SELECT COUNT(*) FROM task_assignment WHERE is_deleted=0 AND task_kind='subtask'").fetchone()[0]
     by_emp = db.execute("""
-        SELECT e.last_name, e.first_name, pt.name pos,
+        SELECT e.id, e.last_name, e.first_name, pt.name pos,
                COALESCE(SUM(CASE WHEN ta.task_kind='task' THEN ta.share ELSE 0 END), 0) task_share,
                COALESCE(SUM(CASE WHEN ta.task_kind='subtask' THEN ta.share ELSE 0 END), 0) sub_share,
                COUNT(ta.id) acnt
@@ -4222,14 +4316,15 @@ def report_assignments():
         WHERE e.is_deleted=0
         GROUP BY e.id ORDER BY (task_share + sub_share) DESC
     """).fetchall()
+    eff = {a['id']: _employee_effective_load(db, a['id']) for a in by_emp}
     db.close()
-    max_load = max((a['task_share'] + a['sub_share'] for a in by_emp), default=0)
+    max_load = max(eff.values(), default=0)
     cards = [('Назначений всего', a_total, '#2c3e50'),
              ('По задачам', a_task, '#3498db'),
              ('По подзадачам', a_sub, '#27ae60'),
              ('Максимальная загрузка', f'{round(max_load * 100)}%', '#e74c3c')]
-    rows = [[a['last_name'], a['first_name'], a['pos'], f"{round(a['task_share'] * 100)}%",
-             f"{round(a['sub_share'] * 100)}%", f"{round((a['task_share'] + a['sub_share']) * 100)}%", a['acnt']] for a in by_emp]
+    rows = [[f'<a href="{url_for("employee_detail", id=a["id"])}">{a["last_name"]} {a["first_name"]}</a>', a['pos'], f"{round((eff[a['id']]) * 100)}%",
+             '—', f"{round(eff[a['id']] * 100)}%", a['acnt']] for a in by_emp]
     return _report_page('Отчёт: Назначения', cards, [
         {'title': 'Загрузка по сотрудникам', 'headers': ['Сотрудник', 'Должность', 'Задачи (доля)', 'Подзадачи (доля)', 'Итого %', 'Назначений'], 'rows': rows},
     ])
@@ -4251,7 +4346,7 @@ def report_events():
              ('За 30 дней', e_last30, '#3498db'),
              ('Последнее событие', recent[0]['occurred_at'] if recent else '-', '#2c3e50')]
     rows = [[m['m'], m['cnt']] for m in months]
-    rows2 = [[e['occurred_at'], e['description'], e['decision'] or '-'] for e in recent]
+    rows2 = [[f'<a href="{url_for("event_detail", id=e["id"])}">{e["occurred_at"]}</a>', e['description'], e['decision'] or '-'] for e in recent]
     return _report_page('Отчёт: События', cards, [
         {'title': 'Динамика по месяцам', 'headers': ['Месяц', 'Кол-во'], 'rows': rows},
         {'title': 'Последние события', 'headers': ['Дата', 'Описание', 'Решение'], 'rows': rows2},
@@ -4273,7 +4368,8 @@ def employee_detail(id):
         db.close()
         flash('Сотрудник не найден', 'error')
         return redirect(url_for('employees_list'))
-    load = db.execute("SELECT COALESCE(SUM(share), 0) FROM task_assignment WHERE employee_id=? AND is_deleted=0", (id,)).fetchone()[0]
+    load = _employee_effective_load(db, id)
+    covered = _covered_for_employee(db, id)
     tasks = db.execute("""
         SELECT ta.share, t.id, t.description, t.deadline, pr.name prio, ts.name st, ts.color color,
                p.name pname, pst.name stype
@@ -4287,6 +4383,7 @@ def employee_detail(id):
         WHERE ta.employee_id=? AND ta.task_kind='task' AND ta.is_deleted=0 AND t.is_deleted=0
         ORDER BY t.id DESC
     """, (id,)).fetchall()
+    tasks = [t for t in tasks if ('task', t['id']) not in covered]
     subtasks = db.execute("""
         SELECT ta.share, s.id, s.description, s.deadline, pr.name prio, ts.name st, ts.color color, t.description parent
         FROM task_assignment ta
@@ -4297,6 +4394,7 @@ def employee_detail(id):
         WHERE ta.employee_id=? AND ta.task_kind='subtask' AND ta.is_deleted=0 AND s.is_deleted=0
         ORDER BY s.id DESC
     """, (id,)).fetchall()
+    subtasks = [s for s in subtasks if ('subtask', s['id']) not in covered]
     db.close()
     info = [
         ('Сотрудник', f"{emp['last_name']} {emp['first_name']} {emp['middle_name'] or ''}"),
