@@ -83,7 +83,11 @@ def smoke():
     html = c.get('/interviews/1').get_data(as_text=True)
     assert 'Hello' in html and 'World' in html and '00:01' in html and '00:05' in html
 
-    c.post('/interviews/1/segment/1/edit', data={'text': 'Hello edited', 'speaker': 'Интервьюер'})
+    # пакетное редактирование транскрипта одной отправкой
+    assert c.get('/interviews/1/transcript/edit').status_code == 200
+    c.post('/interviews/1/transcript/save', data={
+        'text_1': 'Hello edited', 'speaker_1': 'Интервьюер',
+        'text_2': 'World', 'speaker_2': ''})
     html = c.get('/interviews/1').get_data(as_text=True)
     assert 'Hello edited' in html and 'Интервьюер' in html
 

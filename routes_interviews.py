@@ -251,22 +251,17 @@ def interview_detail(id):
         f'<form method="POST" action="{url_for("interview_transcribe", id=id)}" '
         'onsubmit="return busy(this, \'Распознавание…\');" style="display:inline; margin-left:8px;">'
         '<button type="submit" class="btn btn-warning">Распознать (Whisper)</button></form>'
+        f'<a href="{url_for("transcript_edit", id=id)}" class="btn btn-primary" style="margin-left:6px;">Редактировать</a>'
         f'<form method="POST" action="{url_for("transcript_clear", id=id)}" style="display:inline; margin-left:6px;">'
         '<button type="submit" class="btn btn-danger" onclick="return confirm(\'Очистить транскрипт?\')">Очистить</button></form>'
     )
     rows_t = []
     for s in segments:
-        edit_form = (
-            f'<form method="POST" action="{url_for("transcript_segment_edit", id=id, sid=s["id"])}" style="display:flex; gap:4px;">'
-            f'<input type="text" name="speaker" value="{html.escape(s["speaker"] or "")}" placeholder="спикер" style="width:110px;">'
-            f'<input type="text" name="text" value="{html.escape(s["text"])}" style="flex:1; min-width:220px;">'
-            '<button class="btn btn-primary" type="submit">OK</button></form>'
-        )
         rows_t.append([
             f'<a href="#" onclick="seek({s["start_ms"]}); return false;">{fmt_timecode(s["start_ms"])}</a>',
             fmt_timecode(s['end_ms']),
             html.escape(s['speaker'] or '-'),
-            edit_form,
+            html.escape(s['text']),
             f'<a href="{url_for("transcript_segment_delete", id=id, sid=s["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>',
         ])
 
@@ -507,14 +502,55 @@ def interview_transcribe(id):
     flash(f'Распознано сегментов: {len(segs)}', 'success')
     return redirect(url_for('interview_detail', id=id))
 
-@app.route('/interviews/<int:id>/segment/<int:sid>/edit', methods=['POST'])
-def transcript_segment_edit(id, sid):
+@app.route('/interviews/<int:id>/transcript/edit')
+def transcript_edit(id):
     db = get_db()
-    db.execute("UPDATE transcript_segment SET text=?, speaker=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND interview_id=?",
-               (request.form['text'], request.form.get('speaker') or None, sid, id))
+    iv = db.execute("SELECT i.*, s.last_name, s.first_name FROM interview i JOIN stakeholder s ON i.stakeholder_id=s.id WHERE i.id=? AND i.is_deleted=0", (id,)).fetchone()
+    if not iv:
+        db.close()
+        flash('Интервью не найдено', 'error')
+        return redirect(url_for('interviews_list'))
+    segments = db.execute("SELECT * FROM transcript_segment WHERE interview_id=? AND is_deleted=0 ORDER BY start_ms, id", (id,)).fetchall()
+    db.close()
+    rows = ''.join([
+        f'<tr><td>{fmt_timecode(s["start_ms"])}</td><td>{fmt_timecode(s["end_ms"])}</td>'
+        f'<td><input type="text" name="speaker_{s["id"]}" value="{html.escape(s["speaker"] or "")}" placeholder="спикер" style="width:130px;"></td>'
+        f'<td><input type="text" name="text_{s["id"]}" value="{html.escape(s["text"])}" style="width:100%;"></td></tr>'
+        for s in segments])
+    content = f'''
+    <div class="card">
+        <h2>Редактирование транскрипта (интервью #{id})</h2>
+        <form method="POST" action="{url_for('transcript_segments_save', id=id)}" onsubmit="return busy(this, 'Сохранение…');">
+            <table>
+                <thead><tr><th>Начало</th><th>Конец</th><th>Спикер</th><th>Текст</th></tr></thead>
+                <tbody>{rows}</tbody>
+            </table>
+            <p style="margin-top:12px;">
+                <button type="submit" class="btn btn-success">Сохранить все</button>
+                <a href="{url_for('interview_detail', id=id)}" class="btn btn-primary">Отмена</a>
+            </p>
+        </form>
+        <script>function busy(f, l) {{ var b = f.querySelector('button[type="submit"]'); if (b) {{ b.disabled = true; b.textContent = l; }} return true; }}</script>
+    </div>'''
+    return render_template_string(BASE_TEMPLATE, title='Редактирование транскрипта', content=content)
+
+@app.route('/interviews/<int:id>/transcript/save', methods=['POST'])
+def transcript_segments_save(id):
+    db = get_db()
+    n = 0
+    for key, val in request.form.items():
+        if key.startswith('text_'):
+            try:
+                sid = int(key[len('text_'):])
+            except ValueError:
+                continue
+            speaker = request.form.get(f'speaker_{sid}') or None
+            db.execute("UPDATE transcript_segment SET text=?, speaker=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND interview_id=?",
+                       (val, speaker, sid, id))
+            n += 1
     db.commit()
     db.close()
-    flash('Сегмент обновлён', 'success')
+    flash(f'Сохранено сегментов: {n}', 'success')
     return redirect(url_for('interview_detail', id=id))
 
 @app.route('/interviews/<int:id>/segment/<int:sid>/delete')

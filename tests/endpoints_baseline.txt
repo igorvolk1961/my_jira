@@ -27,9 +27,10 @@
 /interviews/<int:id>/audio	interview_audio_upload
 /interviews/<int:id>/export	interview_export
 /interviews/<int:id>/segment/<int:sid>/delete	transcript_segment_delete
-/interviews/<int:id>/segment/<int:sid>/edit	transcript_segment_edit
 /interviews/<int:id>/segments/clear	transcript_clear
 /interviews/<int:id>/transcribe	interview_transcribe
+/interviews/<int:id>/transcript/edit	transcript_edit
+/interviews/<int:id>/transcript/save	transcript_segments_save
 /interviews/audio/<int:aid>	interview_audio_get
 /interviews/audio/<int:aid>/delete	interview_audio_delete
 /interviews/audio/<int:aid>/download	interview_audio_download

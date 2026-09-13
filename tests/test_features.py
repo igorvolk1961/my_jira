@@ -33,7 +33,7 @@ def test_audio_upload_and_serve(client):
     assert client.get('/interviews/audio/1/download').status_code == 200
 
 
-def test_transcript_segment_edit_delete(client):
+def test_transcript_batch_edit_save_and_delete(client):
     _mk_interview(client)
     # Сегменты создаём напрямую в БД (импорт SRT/VTT/TXT удалён из UI и маршрутов)
     con = sqlite3.connect(main.db_path_for(TEST_DB))
@@ -43,11 +43,18 @@ def test_transcript_segment_edit_delete(client):
     con.close()
     html = client.get('/interviews/1').get_data(as_text=True)
     assert 'Hello' in html and 'World' in html and '00:01' in html and '00:05' in html
-    client.post('/interviews/1/segment/1/edit', data={'text': 'Hello edited', 'speaker': 'Интервьюер'})
-    html = client.get('/interviews/1').get_data(as_text=True)
+    # страница редактирования транскрипта — одна форма на все сегменты
+    assert client.get('/interviews/1/transcript/edit').status_code == 200
+    # пакетное сохранение всех сегментов одной отправкой
+    r = client.post('/interviews/1/transcript/save', data={
+        'text_1': 'Hello edited', 'speaker_1': 'Интервьюер',
+        'text_2': 'World edited', 'speaker_2': 'Стейкхолдер'}, follow_redirects=True)
+    html = r.get_data(as_text=True)
     assert 'Hello edited' in html and 'Интервьюер' in html
+    assert 'World edited' in html and 'Стейкхолдер' in html
+    # удаление одного сегмента
     client.get('/interviews/1/segment/2/delete')
-    assert 'World' not in client.get('/interviews/1').get_data(as_text=True)
+    assert 'World edited' not in client.get('/interviews/1').get_data(as_text=True)
 
 
 def test_transcribe_endpoint_does_not_crash(client):
