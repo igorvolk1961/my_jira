@@ -73,10 +73,13 @@ def smoke():
     assert 'rec.wav' in c.get('/interviews/1').get_data(as_text=True)
     assert c.get('/interviews/audio/1').status_code == 200
 
-    srt = b'1\n00:00:01,000 --> 00:00:04,000\nHello\n\n2\n00:00:05,000 --> 00:00:07,500\nWorld\n'
-    r = c.post('/interviews/1/transcript/import', data={'file': (io.BytesIO(srt), 't.srt')},
-               content_type='multipart/form-data')
-    assert r.status_code in (200, 302)
+    # Транскрипт: сегменты создаём напрямую (импорт SRT/VTT/TXT из UI убран)
+    import sqlite3
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    con.execute("INSERT INTO transcript_segment (interview_id, start_ms, end_ms, text) VALUES (1, 1000, 4000, 'Hello')")
+    con.execute("INSERT INTO transcript_segment (interview_id, start_ms, end_ms, text) VALUES (1, 5000, 7500, 'World')")
+    con.commit()
+    con.close()
     html = c.get('/interviews/1').get_data(as_text=True)
     assert 'Hello' in html and 'World' in html and '00:01' in html and '00:05' in html
 
@@ -84,9 +87,9 @@ def smoke():
     html = c.get('/interviews/1').get_data(as_text=True)
     assert 'Hello edited' in html and 'Интервьюер' in html
 
-    # Транскрибация без установленного движка -> дружелюбное сообщение (не 500)
+    # /transcribe не должен падать (движок может быть недоступен, аудио — фиктивное)
     r = c.post('/interviews/1/transcribe', data={}, follow_redirects=True)
-    assert r.status_code == 200 and 'Распознавание' in r.get_data(as_text=True)
+    assert r.status_code == 200
 
     # Отчёты, БД
     for p in ['/reports/projects', '/reports/tasks', '/reports/employees', '/database']:

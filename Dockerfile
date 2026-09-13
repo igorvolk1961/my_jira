@@ -5,7 +5,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml main.py ./
+COPY pyproject.toml ./
+COPY *.py ./
 
 RUN pip install --no-cache-dir flask==3.1.3 gunicorn>=21.2.0
 

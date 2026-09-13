@@ -36,7 +36,9 @@ def engine_available():
 
 def _transcribe_faster_whisper(path, model, language):
     from faster_whisper import WhisperModel
+    print(f'[stt] загузка модели "{model}" (при первом запуске может скачиваться)…', flush=True)
     wm = WhisperModel(model, device='cpu', compute_type='int8')
+    print('[stt] модель загружена, распознавание…', flush=True)
     segments, _info = wm.transcribe(path, language=language, vad_filter=True)
     out = []
     for s in segments:

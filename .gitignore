@@ -15,6 +15,7 @@ data/*.db-shm
 data/backups/
 data/audio/
 data/dev_verify_audio/
+data/*audio/
 
 # Файлы окружения
 .env
