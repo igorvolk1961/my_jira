@@ -5,12 +5,14 @@
 """
 
 from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, session, send_file
+from werkzeug.utils import secure_filename
 import sqlite3
 from datetime import datetime, date
 from io import BytesIO
 import html
 import json
 import os
+import re
 import shutil
 
 app = Flask(__name__)
@@ -19,7 +21,9 @@ app.secret_key = os.environ.get('UPO_SECRET_KEY', 'upo_secret_key_2026')
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_DIR = os.path.join(BASE_DIR, 'data')
 DEFAULT_DB_NAME = os.environ.get('UPO_DATABASE', 'upo_database.db')
+AUDIO_DIR = os.environ.get('UPO_AUDIO_DIR', os.path.join(DATABASE_DIR, 'audio'))
 os.makedirs(DATABASE_DIR, exist_ok=True)
+os.makedirs(AUDIO_DIR, exist_ok=True)
 
 def db_path_for(name):
     return os.path.join(DATABASE_DIR, name)
@@ -334,6 +338,33 @@ def init_db(path=None):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_deleted INTEGER DEFAULT 0
         );
+
+        -- Аудиозаписи интервью (диктофон/загрузка/экспорт из Buzz)
+        CREATE TABLE IF NOT EXISTS interview_audio (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interview_id INTEGER NOT NULL REFERENCES interview(id) ON DELETE CASCADE,
+            filename TEXT NOT NULL,
+            original_name TEXT,
+            mime TEXT,
+            duration_ms INTEGER,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+
+        -- Транскрипт интервью по сегментам (посегментные таймкоды + метка спикера)
+        CREATE TABLE IF NOT EXISTS transcript_segment (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            interview_id INTEGER NOT NULL REFERENCES interview(id) ON DELETE CASCADE,
+            audio_id INTEGER REFERENCES interview_audio(id),
+            start_ms INTEGER NOT NULL DEFAULT 0,
+            end_ms INTEGER NOT NULL DEFAULT 0,
+            speaker TEXT,
+            text TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+        CREATE INDEX IF NOT EXISTS idx_seg_interview ON transcript_segment(interview_id, start_ms);
     ''')
     
     # Миграции для существующих БД (добавление новых колонок)
@@ -503,6 +534,44 @@ def _projected_load_after(db, emp_id, kind, task_id, new_share, exclude_assignme
 def _employee_load_excluding(db, emp_id, exclude_assignment_id=0):
     return db.execute("SELECT COALESCE(SUM(share),0) FROM task_assignment WHERE employee_id=? AND is_deleted=0 AND id<>?",
                       (emp_id, exclude_assignment_id)).fetchone()[0]
+
+_TC_RE = re.compile(r'(\d{1,2}):(\d{2}):(\d{2})[.,](\d{1,3})')
+
+def _parse_timecode(s):
+    m = _TC_RE.search(s or '')
+    if not m:
+        return None
+    h, mm, ss, ms = m.groups()
+    ms = (ms + '000')[:3]
+    return ((int(h) * 60 + int(mm)) * 60 + int(ss)) * 1000 + int(ms)
+
+def fmt_timecode(ms):
+    if not ms:
+        return '00:00'
+    s = ms // 1000
+    return f'{s // 60:02d}:{s % 60:02d}'
+
+def parse_transcript(text):
+    """Разбирает SRT/VTT/TXT в список сегментов {start_ms, end_ms, text}."""
+    text = (text or '').replace('\r\n', '\n').replace('\r', '\n').lstrip('\ufeff')
+    segs = []
+    for block in re.split(r'\n\s*\n', text.strip()):
+        lines = block.split('\n')
+        t_idx = next((i for i, l in enumerate(lines) if '-->' in l), None)
+        if t_idx is None:
+            continue
+        lhs, _, rhs = lines[t_idx].partition('-->')
+        start = _parse_timecode(lhs) or 0
+        end = _parse_timecode(rhs) or 0
+        body = re.sub(r'<[^>]+>', '', '\n'.join(lines[t_idx + 1:])).strip()
+        if body:
+            segs.append({'start_ms': start, 'end_ms': end, 'text': body})
+    if not segs:
+        for line in text.split('\n'):
+            line = line.strip()
+            if line:
+                segs.append({'start_ms': 0, 'end_ms': 0, 'text': line})
+    return segs
 
 def _entity_project_id(db, etype, eid):
     if etype == 'task':
@@ -4987,6 +5056,8 @@ def interview_detail(id):
         flash('Интервью не найдено', 'error')
         return redirect(url_for('interviews_list'))
     qas = db.execute("SELECT * FROM interview_qa WHERE interview_id=? AND is_deleted=0 ORDER BY id", (id,)).fetchall()
+    audios = db.execute("SELECT * FROM interview_audio WHERE interview_id=? AND is_deleted=0 ORDER BY id", (id,)).fetchall()
+    segments = db.execute("SELECT * FROM transcript_segment WHERE interview_id=? AND is_deleted=0 ORDER BY start_ms, id", (id,)).fetchall()
     db.close()
     info = [
         ('Интервью', f'#{id}'),
@@ -5000,9 +5071,89 @@ def interview_detail(id):
                f'<a href="{url_for("interview_qa_edit", id=q["id"])}" class="btn btn-primary">Изменить</a> '
                f'<a href="{url_for("interview_qa_delete", id=q["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'
                '</div>'] for q in qas]
+
+    audio_upload_form = (
+        f'<form method="POST" action="{url_for("interview_audio_upload", id=id)}" enctype="multipart/form-data" '
+        'style="display:inline-flex; gap:6px; align-items:center; margin-right:8px;">'
+        '<input type="file" name="file" accept="audio/*" required style="width:auto;">'
+        '<button type="submit" class="btn btn-primary">Загрузить аудио</button></form>'
+    )
+    rec_controls = (
+        '<button type="button" class="btn btn-danger" id="recStart" onclick="startRec()">● Записать</button> '
+        '<button type="button" class="btn btn-secondary" id="recStop" onclick="stopRec()" style="display:none;">■ Стоп</button> '
+        '<span id="recStatus" class="muted" style="margin-left:6px;"></span>'
+    )
+    _rec_script = '''<script>
+    var mediaRecorder = null, chunks = [];
+    async function startRec() {
+      try {
+        var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        chunks = [];
+        mediaRecorder.ondataavailable = function (e) { if (e.data.size) chunks.push(e.data); };
+        mediaRecorder.onstop = async function () {
+          var mt = mediaRecorder.mimeType || 'audio/webm';
+          var ext = mt.indexOf('mp4') >= 0 ? 'm4a' : 'webm';
+          var blob = new Blob(chunks, { type: mt });
+          var fd = new FormData();
+          fd.append('file', blob, 'record.' + ext);
+          await fetch('__UPLOAD__', { method: 'POST', body: fd });
+          location.reload();
+        };
+        mediaRecorder.start();
+        document.getElementById('recStatus').textContent = '● запись…';
+        document.getElementById('recStart').style.display = 'none';
+        document.getElementById('recStop').style.display = 'inline-block';
+      } catch (e) {
+        document.getElementById('recStatus').textContent = 'Нет доступа к микрофону (нужен HTTPS или localhost)';
+      }
+    }
+    function stopRec() {
+      if (mediaRecorder) { mediaRecorder.stop(); document.getElementById('recStop').style.display = 'none';
+        document.getElementById('recStatus').textContent = 'сохранение…'; }
+    }
+    function seek(ms) { var a = document.querySelector('audio.player'); if (a) { a.currentTime = ms / 1000; a.play(); } }
+    </script>'''.replace('__UPLOAD__', url_for('interview_audio_upload', id=id))
+    actions = export_btn + ' ' + audio_upload_form + ' ' + rec_controls + _rec_script
+
+    rows_a = [[a['id'], a['original_name'] or a['filename'],
+               f'<audio class="player" controls preload="none" style="height:32px; vertical-align:middle;" src="{url_for("interview_audio_get", aid=a["id"])}"></audio>',
+               f'<a href="{url_for("interview_audio_download", aid=a["id"])}" class="btn btn-primary">Скачать</a>',
+               f'<a href="{url_for("interview_audio_delete", aid=a["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>']
+              for a in audios]
+
+    import_form = (
+        f'<form method="POST" action="{url_for("interview_transcript_import", id=id)}" enctype="multipart/form-data" '
+        'style="display:inline-flex; gap:6px; align-items:center; margin-left:8px;">'
+        '<input type="file" name="file" accept=".srt,.vtt,.txt" required style="width:auto;">'
+        '<button type="submit" class="btn btn-primary">Импорт (SRT/VTT/TXT)</button></form>'
+        f'<form method="POST" action="{url_for("interview_transcribe", id=id)}" style="display:inline; margin-left:6px;">'
+        '<button type="submit" class="btn btn-warning">Распознать (Whisper)</button></form>'
+        f'<form method="POST" action="{url_for("transcript_clear", id=id)}" style="display:inline; margin-left:6px;">'
+        '<button type="submit" class="btn btn-danger" onclick="return confirm(\'Очистить транскрипт?\')">Очистить</button></form>'
+    )
+    rows_t = []
+    for s in segments:
+        edit_form = (
+            f'<form method="POST" action="{url_for("transcript_segment_edit", id=id, sid=s["id"])}" style="display:flex; gap:4px;">'
+            f'<input type="text" name="speaker" value="{html.escape(s["speaker"] or "")}" placeholder="спикер" style="width:110px;">'
+            f'<input type="text" name="text" value="{html.escape(s["text"])}" style="flex:1; min-width:220px;">'
+            '<button class="btn btn-primary" type="submit">OK</button></form>'
+        )
+        rows_t.append([
+            f'<a href="#" onclick="seek({s["start_ms"]}); return false;">{fmt_timecode(s["start_ms"])}</a>',
+            fmt_timecode(s['end_ms']),
+            html.escape(s['speaker'] or '-'),
+            edit_form,
+            f'<a href="{url_for("transcript_segment_delete", id=id, sid=s["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>',
+        ])
+
     return _detail_page('Интервью #' + str(id), info, [
         {'title': 'Вопросы и ответы ' + add_qa, 'headers': ['ID', 'Вопрос', 'Ответ', 'Действия'], 'rows': rows_q},
-    ], actions=export_btn)
+        {'title': 'Аудиозаписи', 'headers': ['ID', 'Файл', 'Прослушать', 'Скачать', 'Действия'], 'rows': rows_a},
+        {'title': 'Транскрипт (посегментные таймкоды) ' + import_form,
+         'headers': ['Начало', 'Конец', 'Спикер', 'Текст', 'Действия'], 'rows': rows_t},
+    ], actions=actions)
 
 @app.route('/interviews/<int:id>/export')
 def interview_export(id):
@@ -5017,6 +5168,7 @@ def interview_export(id):
         flash('Интервью не найдено', 'error')
         return redirect(url_for('interviews_list'))
     qas = db.execute("SELECT * FROM interview_qa WHERE interview_id=? AND is_deleted=0 ORDER BY id", (id,)).fetchall()
+    segments = db.execute("SELECT * FROM transcript_segment WHERE interview_id=? AND is_deleted=0 ORDER BY start_ms, id", (id,)).fetchall()
     db.close()
     lines = [f'# Интервью #{id}', '']
     lines.append(f'- **Стейкхолдер:** {iv["last_name"]} {iv["first_name"]}')
@@ -5028,6 +5180,12 @@ def interview_export(id):
         for i, q in enumerate(qas, 1):
             lines += [f'### Вопрос {i}', '', f'**Вопрос:** {q["question"]}',
                       '', f'**Ответ:** {q["answer"] or "_(нет ответа)_"}', '']
+    if segments:
+        lines += ['', '## Транскрипт', '']
+        for s in segments:
+            who = f' **{s["speaker"]}:**' if s['speaker'] else ''
+            lines.append(f'- `[{fmt_timecode(s["start_ms"])}]`{who} {s["text"]}')
+        lines.append('')
     md = '\n'.join(lines)
     return send_file(BytesIO(md.encode('utf-8')), mimetype='text/markdown',
                      as_attachment=True, download_name=f'interview_{id}.md')
@@ -5325,6 +5483,155 @@ def comment_delete(id):
     db.close()
     flash('Комментарий не найден', 'error')
     return redirect(url_for('tasks_list'))
+
+#==================== АУДИО И ТРАНСКРИПТ ИНТЕРВЬЮ ====================
+
+def _audio_path(audio_row):
+    return os.path.join(AUDIO_DIR, audio_row['filename'])
+
+@app.route('/interviews/<int:id>/audio', methods=['POST'])
+def interview_audio_upload(id):
+    f = request.files.get('file')
+    if not f or not f.filename:
+        flash('Файл не выбран', 'error')
+        return redirect(url_for('interview_detail', id=id))
+    ext = os.path.splitext(secure_filename(f.filename))[1].lower() or '.webm'
+    name = f'interview_{id}_{datetime.now().strftime("%Y%m%d_%H%M%S")}{ext}'
+    f.save(os.path.join(AUDIO_DIR, name))
+    dur = request.form.get('duration_ms')
+    db = get_db()
+    db.execute("INSERT INTO interview_audio (interview_id, filename, original_name, mime, duration_ms) VALUES (?, ?, ?, ?, ?)",
+               (id, name, f.filename, f.mimetype, int(dur) if dur else None))
+    db.commit()
+    db.close()
+    flash('Аудиозапись загружена', 'success')
+    return redirect(url_for('interview_detail', id=id))
+
+@app.route('/interviews/audio/<int:aid>')
+def interview_audio_get(aid):
+    db = get_db()
+    a = db.execute("SELECT * FROM interview_audio WHERE id=? AND is_deleted=0", (aid,)).fetchone()
+    db.close()
+    if not a or not os.path.exists(_audio_path(a)):
+        flash('Аудиозапись не найдена', 'error')
+        return redirect(url_for('interviews_list'))
+    return send_file(_audio_path(a), mimetype=a['mime'] or 'application/octet-stream', as_attachment=False)
+
+@app.route('/interviews/audio/<int:aid>/download')
+def interview_audio_download(aid):
+    db = get_db()
+    a = db.execute("SELECT * FROM interview_audio WHERE id=? AND is_deleted=0", (aid,)).fetchone()
+    db.close()
+    if not a or not os.path.exists(_audio_path(a)):
+        flash('Аудиозапись не найдена', 'error')
+        return redirect(url_for('interviews_list'))
+    return send_file(_audio_path(a), mimetype=a['mime'] or 'application/octet-stream', as_attachment=True,
+                     download_name=a['original_name'] or a['filename'])
+
+@app.route('/interviews/audio/<int:aid>/delete')
+def interview_audio_delete(aid):
+    db = get_db()
+    a = db.execute("SELECT * FROM interview_audio WHERE id=?", (aid,)).fetchone()
+    if a:
+        iid = a['interview_id']
+        db.execute("UPDATE interview_audio SET is_deleted=1 WHERE id=?", (aid,))
+        db.commit()
+        db.close()
+        try:
+            os.remove(_audio_path(a))
+        except OSError:
+            pass
+        flash('Аудиозапись удалена', 'success')
+        return redirect(url_for('interview_detail', id=iid))
+    db.close()
+    flash('Аудиозапись не найдена', 'error')
+    return redirect(url_for('interviews_list'))
+
+@app.route('/interviews/<int:id>/transcript/import', methods=['POST'])
+def interview_transcript_import(id):
+    f = request.files.get('file')
+    if not f or not f.filename:
+        flash('Файл транскрипта не выбран', 'error')
+        return redirect(url_for('interview_detail', id=id))
+    raw = f.read()
+    text = None
+    for enc in ('utf-8', 'cp1251'):
+        try:
+            text = raw.decode(enc)
+            break
+        except UnicodeDecodeError:
+            pass
+    if text is None:
+        text = raw.decode('utf-8', 'replace')
+    segs = parse_transcript(text)
+    aid = request.form.get('audio_id') or None
+    db = get_db()
+    for s in segs:
+        db.execute("INSERT INTO transcript_segment (interview_id, audio_id, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)",
+                   (id, int(aid) if aid else None, s['start_ms'], s['end_ms'], s['text']))
+    db.commit()
+    db.close()
+    flash(f'Импортировано сегментов: {len(segs)}', 'success')
+    return redirect(url_for('interview_detail', id=id))
+
+@app.route('/interviews/<int:id>/transcribe', methods=['POST'])
+def interview_transcribe(id):
+    db = get_db()
+    aid = request.form.get('audio_id')
+    if aid:
+        a = db.execute("SELECT * FROM interview_audio WHERE id=? AND interview_id=? AND is_deleted=0", (int(aid), id)).fetchone()
+    else:
+        a = db.execute("SELECT * FROM interview_audio WHERE interview_id=? AND is_deleted=0 ORDER BY id DESC LIMIT 1", (id,)).fetchone()
+    db.close()
+    if not a:
+        flash('Сначала загрузите или запишите аудио', 'error')
+        return redirect(url_for('interview_detail', id=id))
+    if not os.path.exists(_audio_path(a)):
+        flash('Аудиофайл не найден на диске', 'error')
+        return redirect(url_for('interview_detail', id=id))
+    try:
+        import transcribe as stt
+        segs = stt.transcribe(_audio_path(a))
+    except Exception as e:
+        flash(f'Распознавание недоступно: {e}', 'error')
+        return redirect(url_for('interview_detail', id=id))
+    db = get_db()
+    db.execute("UPDATE transcript_segment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE interview_id=? AND audio_id=?", (id, a['id']))
+    for s in segs:
+        db.execute("INSERT INTO transcript_segment (interview_id, audio_id, start_ms, end_ms, text) VALUES (?, ?, ?, ?, ?)",
+                   (id, a['id'], s['start_ms'], s['end_ms'], s['text']))
+    db.commit()
+    db.close()
+    flash(f'Распознано сегментов: {len(segs)}', 'success')
+    return redirect(url_for('interview_detail', id=id))
+
+@app.route('/interviews/<int:id>/segment/<int:sid>/edit', methods=['POST'])
+def transcript_segment_edit(id, sid):
+    db = get_db()
+    db.execute("UPDATE transcript_segment SET text=?, speaker=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND interview_id=?",
+               (request.form['text'], request.form.get('speaker') or None, sid, id))
+    db.commit()
+    db.close()
+    flash('Сегмент обновлён', 'success')
+    return redirect(url_for('interview_detail', id=id))
+
+@app.route('/interviews/<int:id>/segment/<int:sid>/delete')
+def transcript_segment_delete(id, sid):
+    db = get_db()
+    db.execute("UPDATE transcript_segment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=? AND interview_id=?", (sid, id))
+    db.commit()
+    db.close()
+    flash('Сегмент удалён', 'success')
+    return redirect(url_for('interview_detail', id=id))
+
+@app.route('/interviews/<int:id>/segments/clear', methods=['POST'])
+def transcript_clear(id):
+    db = get_db()
+    db.execute("UPDATE transcript_segment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE interview_id=?", (id,))
+    db.commit()
+    db.close()
+    flash('Транскрипт очищен', 'success')
+    return redirect(url_for('interview_detail', id=id))
 
 #==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================
 

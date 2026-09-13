@@ -24,6 +24,8 @@
 - **task_assignment**(id, task_id, task_kind IN('task','subtask'), employee_id→employee, share 0–1)
 - **interview**(id, stakeholder_id→stakeholder, scheduled_at)
 - **interview_qa**(id, interview_id→interview, question, answer)
+- **interview_audio**(id, interview_id→interview, filename, original_name, mime, duration_ms) — записи интервью (диктофон/загрузка)
+- **transcript_segment**(id, interview_id→interview, audio_id→interview_audio, start_ms, end_ms, speaker, text) — посегментные таймкоды + метка спикера
 - **comment**(id, entity_type IN('task','subtask'), entity_id, author, text, created_at)
 - **event**(id, occurred_at, description, decision)
 

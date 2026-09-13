@@ -8,10 +8,12 @@
 """
 
 import os
+import shutil
 import sys
 
 TEST_DB = 'dev_verify.db'
 os.environ['UPO_DATABASE'] = TEST_DB  # до импорта main! -> DEFAULT_DB_NAME = TEST_DB
+os.environ['UPO_AUDIO_DIR'] = os.path.join('data', 'dev_verify_audio')  # изоляция аудио теста
 
 import main  # noqa: E402
 from main import app  # noqa: E402
@@ -63,6 +65,29 @@ def smoke():
     exp = c.get('/interviews/1/export')
     assert exp.status_code == 200 and exp.headers.get('Content-Type', '').startswith('text/markdown')
 
+    # Аудио + транскрипт с посегментными таймкодами
+    import io
+    r = c.post('/interviews/1/audio', data={'file': (io.BytesIO(b'RIFFfake'), 'rec.wav')},
+               content_type='multipart/form-data')
+    assert r.status_code in (200, 302)
+    assert 'rec.wav' in c.get('/interviews/1').get_data(as_text=True)
+    assert c.get('/interviews/audio/1').status_code == 200
+
+    srt = b'1\n00:00:01,000 --> 00:00:04,000\nHello\n\n2\n00:00:05,000 --> 00:00:07,500\nWorld\n'
+    r = c.post('/interviews/1/transcript/import', data={'file': (io.BytesIO(srt), 't.srt')},
+               content_type='multipart/form-data')
+    assert r.status_code in (200, 302)
+    html = c.get('/interviews/1').get_data(as_text=True)
+    assert 'Hello' in html and 'World' in html and '00:01' in html and '00:05' in html
+
+    c.post('/interviews/1/segment/1/edit', data={'text': 'Hello edited', 'speaker': 'Интервьюер'})
+    html = c.get('/interviews/1').get_data(as_text=True)
+    assert 'Hello edited' in html and 'Интервьюер' in html
+
+    # Транскрибация без установленного движка -> дружелюбное сообщение (не 500)
+    r = c.post('/interviews/1/transcribe', data={}, follow_redirects=True)
+    assert r.status_code == 200 and 'Распознавание' in r.get_data(as_text=True)
+
     # Отчёты, БД
     for p in ['/reports/projects', '/reports/tasks', '/reports/employees', '/database']:
         assert c.get(p).status_code == 200
@@ -81,4 +106,5 @@ if __name__ == '__main__':
         for suf in ('', '-wal', '-shm'):
             if os.path.exists(p + suf):
                 os.remove(p + suf)
+        shutil.rmtree(main.AUDIO_DIR, ignore_errors=True)
         print('Тестовая БД удалена, рабочая БД не затронута.')
