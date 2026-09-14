@@ -51,25 +51,27 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
+from app_core import current_user  # noqa: F401
 
 #==================== СОТРУДНИКИ ====================
 @app.route('/employees')
 def employees_list():
     db = get_db()
     employees = db.execute("""
-        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available,
-               (SELECT COUNT(*) FROM app_user u WHERE u.employee_id = e.id AND u.is_deleted = 0) AS linked_user
+        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available
         FROM employee e
         JOIN position_type pt ON e.position_type_id = pt.id
         JOIN employee_status es ON e.status_id = es.id
         WHERE e.is_deleted=0
         ORDER BY e.last_name
     """).fetchall()
+    _me = current_user()
+    self_emp_id = _me['employee_id'] if _me else None
 
     rows = ''
     for e in employees:
         delete_btn = ''
-        if not e['linked_user']:
+        if e['id'] != self_emp_id:
             delete_btn = (f'<a href="{url_for("employee_delete", id=e["id"])}" class="btn btn-danger" '
                           f'onclick="return confirm(\'Удалить?\')">Удалить</a>')
         rows += f'''
@@ -266,15 +268,19 @@ def employee_edit(id):
 @app.route('/employees/delete/<int:id>')
 def employee_delete(id):
     db = get_db()
-    linked = db.execute("SELECT COUNT(*) FROM app_user WHERE employee_id=? AND is_deleted=0", (id,)).fetchone()[0]
-    if linked:
+    me = current_user()
+    if me and me['employee_id'] == id:
         db.close()
-        flash('Сотрудник связан с зарегистрированным пользователем — удаление запрещено', 'error')
+        flash('Нельзя удалить собственную учётную запись', 'error')
         return redirect(url_for('employees_list'))
+    # Удаляем учётные записи пользователей, связанных с этим сотрудником,
+    # чтобы не оставлять «висячие» app_user.employee_id.
+    linked = db.execute("SELECT COUNT(*) FROM app_user WHERE employee_id=? AND is_deleted=0", (id,)).fetchone()[0]
+    db.execute("UPDATE app_user SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE employee_id=? AND is_deleted=0", (id,))
     db.execute("UPDATE employee SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
     db.commit()
     db.close()
-    flash('Сотрудник удалён', 'success')
+    flash('Сотрудник и связанный пользователь удалены' if linked else 'Сотрудник удалён', 'success')
     return redirect(url_for('employees_list'))
 
 

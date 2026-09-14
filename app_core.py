@@ -767,15 +767,18 @@ def set_setting(db, key, value):
 
 def current_user():
     """Текущий пользователь (dict) или None. Кэшируется в g на время запроса."""
-    if not hasattr(g, 'current_user'):
+    if not getattr(g, 'current_user_loaded', False):
+        g.current_user_loaded = True
         g.current_user = None
         uid = session.get('user_id')
         if uid:
             try:
                 db = get_db()
                 row = db.execute("""
-                    SELECT u.*, e.last_name, e.first_name, e.middle_name, e.position_type_id
+                    SELECT u.*, e.last_name, e.first_name, e.middle_name, e.position_type_id,
+                           pt.name AS position_name
                     FROM app_user u LEFT JOIN employee e ON u.employee_id=e.id
+                    LEFT JOIN position_type pt ON e.position_type_id=pt.id
                     WHERE u.id=? AND u.is_deleted=0
                 """, (uid,)).fetchone()
                 db.close()
@@ -787,6 +790,7 @@ def current_user():
                         'role': row['role'],
                         'employee_id': row['employee_id'],
                         'position_id': row['position_type_id'],
+                        'position_name': row['position_name'],
                         'full_name': name,
                     }
             except sqlite3.Error:
@@ -1068,6 +1072,9 @@ def _audit_request(user):
 
 @app.before_request
 def _auth_guard():
+    # Сбрасываем кэш пользователя, чтобы он вычислялся заново для каждого запроса
+    # (иначе при переиспользовании app-контекста может «протечь» пользователь предыдущего запроса).
+    g.current_user_loaded = False
     endpoint = request.endpoint
     if not endpoint or endpoint == 'static':
         return None
@@ -1300,7 +1307,7 @@ BASE_TEMPLATE = '''
         <a href="{{ url_for('chat_index') }}">Чат</a>
         <div class="nav-right">
             {% if current_user %}
-                <span>{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }})</span>
+                <span>{% if current_user.position_name %}{{ current_user.position_name }} {% endif %}{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }})</span>
                 <a class="logout-btn" href="{{ url_for('logout') }}">Выход</a>
             {% else %}
                 <a class="login-btn" href="{{ url_for('login') }}">Вход</a>

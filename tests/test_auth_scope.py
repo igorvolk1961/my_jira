@@ -198,3 +198,19 @@ def test_open_redirect_rejected(client):
     r = client.post('/tasks/1/status', data={'status_id': str(accepted), 'next': '/\\evil.com'})
     assert r.status_code == 302
     assert 'evil.com' not in r.headers['Location']
+
+
+def test_employee_delete_allows_others_but_not_self(client):
+    admin_emp = _scalar("SELECT employee_id FROM app_user WHERE login='admin'")
+    client.get(f'/employees/delete/{admin_emp}')
+    assert _scalar("SELECT COUNT(*) FROM employee WHERE id=? AND is_deleted=0", (admin_emp,)) == 1
+
+    client.post('/register', data={'login': 'u2', 'password': 'p', 'last_name': 'У',
+                                   'first_name': 'У', 'middle_name': 'У'})
+    emp = _scalar("SELECT employee_id FROM app_user WHERE login='u2'")
+    client.get(f'/employees/delete/{emp}')
+    assert _scalar("SELECT COUNT(*) FROM employee WHERE id=? AND is_deleted=0", (emp,)) == 0
+    assert _scalar("SELECT COUNT(*) FROM app_user WHERE login='u2' AND is_deleted=0") == 0
+    other = main.app.test_client()
+    other.post('/login', data={'login': 'u2', 'password': 'p'})
+    assert other.get('/my_tasks').status_code == 302
