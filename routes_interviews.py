@@ -78,6 +78,7 @@ def interviews_list():
     <div class="card">
         <h2>Интервью стейкхолдеров</h2>
         <a href="{url_for('interview_create')}" class="btn btn-success">+ Назначить интервью</a>
+        <a href="{url_for('interview_templates_list')}" class="btn btn-primary">Шаблоны интервью</a>
         <table>
             <thead><tr><th>ID</th><th>Стейкхолдер</th><th>Дата-время</th><th>Действия</th></tr></thead>
             <tbody>{rows}</tbody>
@@ -93,15 +94,33 @@ def interview_create():
     if request.method == 'POST':
         cur = db.execute("INSERT INTO interview (stakeholder_id, scheduled_at) VALUES (?, ?)",
                          (int(request.form['stakeholder_id']), request.form.get('scheduled_at') or None))
-        db.commit()
         new_id = cur.lastrowid
+        copied = 0
+        template_id = request.form.get('template_id')
+        if template_id and template_id.isdigit():
+            qs = db.execute("""SELECT question, answer FROM interview_template_question
+                               WHERE template_id=? AND is_deleted=0 ORDER BY position, id""",
+                            (int(template_id),)).fetchall()
+            for q in qs:
+                db.execute("INSERT INTO interview_qa (interview_id, question, answer) VALUES (?, ?, ?)",
+                           (new_id, q['question'], q['answer']))
+            copied = len(qs)
+        db.commit()
         db.close()
-        flash('Интервью назначено', 'success')
+        msg = 'Интервью назначено'
+        if copied:
+            msg += f'; добавлено вопросов из шаблона: {copied}'
+        flash(msg, 'success')
         return redirect(url_for('interview_detail', id=new_id))
     pre_sh = request.args.get('stakeholder_id')
     stakeholders = db.execute("SELECT * FROM stakeholder WHERE is_deleted=0").fetchall()
+    templates = db.execute("SELECT id, name FROM interview_template WHERE is_deleted=0 ORDER BY name").fetchall()
     db.close()
     options = ''.join([f'<option value="{s["id"]}" {"selected" if str(s["id"]) == pre_sh else ""}>{s["last_name"]} {s["first_name"]}</option>' for s in stakeholders])
+    pre_tpl = request.args.get('template_id') or ''
+    template_options = '<option value="">— с нуля (без шаблона) —</option>' + ''.join([
+        f'<option value="{t["id"]}" {"selected" if str(t["id"]) == pre_tpl else ""}>{html.escape(t["name"])}</option>'
+        for t in templates])
     content = f'''
     <div class="card">
         <h2>Новое интервью</h2>
@@ -109,6 +128,12 @@ def interview_create():
             <div class="form-group">
                 <label>Стейкхолдер</label>
                 <select name="stakeholder_id" required>{options}</select>
+            </div>
+            <div class="form-group">
+                <label>Шаблон вопросов</label>
+                <select name="template_id">{template_options}</select>
+                <div class="muted" style="margin-top:6px;">Можно создать с нуля или по шаблону интервью
+                    (<a href="{url_for('interview_templates_list')}">шаблоны</a>).</div>
             </div>
             <div class="form-group">
                 <label>Дата-время</label>
@@ -190,6 +215,7 @@ def interview_detail(id):
     ]
     add_qa = f'<a href="{url_for("interview_qa_create", interview_id=id)}" class="btn btn-success">+ Добавить вопрос</a>'
     export_btn = f'<a href="{url_for("interview_export", id=id)}" class="btn btn-success">Экспорт (Markdown)</a>'
+    save_tpl_btn = f'<a href="{url_for("interview_save_as_template", id=id)}" class="btn btn-warning">Сохранить как шаблон</a>'
     rows_q = [[f'<a href="{url_for("interview_qa_edit", id=q["id"])}">#{q["id"]}</a>', q['question'], q['answer'] or '-',
                '<div style="white-space:nowrap">'
                f'<a href="{url_for("interview_qa_edit", id=q["id"])}" class="btn btn-primary">Изменить</a> '
@@ -239,7 +265,7 @@ def interview_detail(id):
       return true;
     }
     </script>'''.replace('__UPLOAD__', url_for('interview_audio_upload', id=id))
-    actions = export_btn + ' ' + rec_controls + _rec_script
+    actions = export_btn + ' ' + save_tpl_btn + ' ' + rec_controls + _rec_script
 
     rows_a = [[a['id'], a['original_name'] or a['filename'],
                f'<audio class="player" controls preload="none" style="height:32px; vertical-align:middle;" src="{url_for("interview_audio_get", aid=a["id"])}"></audio>',
@@ -399,6 +425,275 @@ def interview_qa_delete(id):
     db.close()
     flash('Вопрос-ответ не найден', 'error')
     return redirect(url_for('interviews_list'))
+
+
+#==================== ШАБЛОНЫ ИНТЕРВЬЮ ====================
+
+@app.route('/interview_templates')
+def interview_templates_list():
+    db = get_db()
+    items = db.execute("""
+        SELECT t.*, (SELECT COUNT(*) FROM interview_template_question q
+                     WHERE q.template_id=t.id AND q.is_deleted=0) AS q_count
+        FROM interview_template t WHERE t.is_deleted=0 ORDER BY t.name
+    """).fetchall()
+    db.close()
+    rows = ''.join([f'''
+        <tr>
+            <td>{t['id']}</td>
+            <td><a href="{url_for('interview_template_detail', id=t['id'])}">{html.escape(t['name'])}</a></td>
+            <td>{html.escape(t['description'] or '-')}</td>
+            <td>{t['q_count']}</td>
+            <td>
+                <a href="{url_for('interview_template_detail', id=t['id'])}" class="btn btn-success">Открыть</a>
+                <a href="{url_for('interview_create', template_id=t['id'])}" class="btn btn-warning">Создать интервью</a>
+                <a href="{url_for('interview_template_delete', id=t['id'])}" class="btn btn-danger" onclick="return confirm('Удалить шаблон?')">Удалить</a>
+            </td>
+        </tr>
+    ''' for t in items])
+    content = f'''
+    <div class="card">
+        <h2>Шаблоны интервью</h2>
+        <a href="{url_for('interview_template_create')}" class="btn btn-success">+ Создать шаблон</a>
+        <a href="{url_for('interviews_list')}" class="btn btn-primary">К интервью</a>
+        <p class="muted" style="margin-top:10px;">Шаблон можно создать вручную или из вопросов прошедшего
+            интервью (кнопка «Сохранить как шаблон» в карточке интервью).</p>
+        <table>
+            <thead><tr><th>ID</th><th>Название</th><th>Описание</th><th>Вопросов</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Шаблоны интервью', content=content)
+
+
+@app.route('/interview_templates/create', methods=['GET', 'POST'])
+def interview_template_create():
+    db = get_db()
+    if request.method == 'POST':
+        name = (request.form.get('name') or '').strip()
+        if not name:
+            db.close()
+            flash('Название шаблона обязательно', 'error')
+            return redirect(url_for('interview_template_create'))
+        cur = db.execute("INSERT INTO interview_template (name, description) VALUES (?, ?)",
+                         (name, request.form.get('description') or None))
+        db.commit()
+        tid = cur.lastrowid
+        db.close()
+        flash('Шаблон создан', 'success')
+        return redirect(url_for('interview_template_detail', id=tid))
+    db.close()
+    content = f'''
+    <div class="card">
+        <h2>Новый шаблон интервью</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label>Название</label>
+                <input type="text" name="name" required>
+            </div>
+            <div class="form-group">
+                <label>Описание</label>
+                <textarea name="description"></textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Сохранить</button>
+            <a href="{url_for('interview_templates_list')}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Новый шаблон интервью', content=content)
+
+
+@app.route('/interview_templates/<int:id>')
+def interview_template_detail(id):
+    db = get_db()
+    t = db.execute("SELECT * FROM interview_template WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if not t:
+        db.close()
+        flash('Шаблон не найден', 'error')
+        return redirect(url_for('interview_templates_list'))
+    qs = db.execute("""SELECT * FROM interview_template_question
+                       WHERE template_id=? AND is_deleted=0 ORDER BY position, id""", (id,)).fetchall()
+    db.close()
+    add_q = f'<a href="{url_for("interview_template_question_create", id=id)}" class="btn btn-success">+ Добавить вопрос</a>'
+    rows = ''.join([f'''
+        <tr>
+            <td>{q['id']}</td>
+            <td>{html.escape(q['question'])}</td>
+            <td>{html.escape(q['answer'] or '-')}</td>
+            <td>
+                <a href="{url_for('interview_template_question_edit', id=q['id'])}" class="btn btn-primary">Изменить</a>
+                <a href="{url_for('interview_template_question_delete', id=q['id'])}" class="btn btn-danger" onclick="return confirm('Удалить вопрос?')">Удалить</a>
+            </td>
+        </tr>''' for q in qs])
+    if not rows:
+        rows = '<tr><td colspan="4" class="muted">Вопросов нет</td></tr>'
+    info = [
+        ('Шаблон', f'#{id}'),
+        ('Название', html.escape(t['name'])),
+        ('Описание', html.escape(t['description'] or '-')),
+    ]
+    info_html = ''.join([f'<tr><th style="width:220px;">{k}</th><td>{v}</td></tr>' for k, v in info])
+    content = f'''
+    <div class="card">
+        <h2>Шаблон интервью</h2>
+        <a href="{url_for('interview_create', template_id=id)}" class="btn btn-warning">Создать интервью по шаблону</a>
+        <a href="{url_for('interview_templates_list')}" class="btn btn-primary">К списку</a>
+        <a href="{url_for('interview_template_delete', id=id)}" class="btn btn-danger" onclick="return confirm('Удалить шаблон?')">Удалить шаблон</a>
+        <table style="margin-top:12px;"><tbody>{info_html}</tbody></table>
+    </div>
+    <div class="card">
+        <h2>Вопросы {add_q}</h2>
+        <table>
+            <thead><tr><th>ID</th><th>Вопрос</th><th>Ответ</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title=t['name'], content=content)
+
+
+@app.route('/interview_templates/delete/<int:id>')
+def interview_template_delete(id):
+    db = get_db()
+    db.execute("UPDATE interview_template SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.execute("UPDATE interview_template_question SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE template_id=?", (id,))
+    db.commit()
+    db.close()
+    flash('Шаблон удалён', 'success')
+    return redirect(url_for('interview_templates_list'))
+
+
+@app.route('/interview_templates/<int:id>/question/create', methods=['GET', 'POST'])
+def interview_template_question_create(id):
+    db = get_db()
+    t = db.execute("SELECT * FROM interview_template WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if not t:
+        db.close()
+        flash('Шаблон не найден', 'error')
+        return redirect(url_for('interview_templates_list'))
+    if request.method == 'POST':
+        pos = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM interview_template_question WHERE template_id=?", (id,)).fetchone()[0]
+        db.execute("INSERT INTO interview_template_question (template_id, question, answer, position) VALUES (?, ?, ?, ?)",
+                   (id, request.form['question'], request.form.get('answer') or None, pos))
+        db.commit()
+        db.close()
+        flash('Вопрос добавлен', 'success')
+        return redirect(url_for('interview_template_detail', id=id))
+    db.close()
+    content = f'''
+    <div class="card">
+        <h2>Новый вопрос шаблона</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label>Вопрос</label>
+                <textarea name="question" required></textarea>
+            </div>
+            <div class="form-group">
+                <label>Ответ (необязательно)</label>
+                <textarea name="answer"></textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Сохранить</button>
+            <a href="{url_for('interview_template_detail', id=id)}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Новый вопрос шаблона', content=content)
+
+
+@app.route('/interview_templates/question/edit/<int:id>', methods=['GET', 'POST'])
+def interview_template_question_edit(id):
+    db = get_db()
+    q = db.execute("SELECT * FROM interview_template_question WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if not q:
+        db.close()
+        flash('Вопрос не найден', 'error')
+        return redirect(url_for('interview_templates_list'))
+    if request.method == 'POST':
+        db.execute("UPDATE interview_template_question SET question=?, answer=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                   (request.form['question'], request.form.get('answer') or None, id))
+        db.commit()
+        db.close()
+        flash('Вопрос обновлён', 'success')
+        return redirect(url_for('interview_template_detail', id=q['template_id']))
+    db.close()
+    content = f'''
+    <div class="card">
+        <h2>Редактировать вопрос шаблона</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label>Вопрос</label>
+                <textarea name="question" required>{html.escape(q['question'])}</textarea>
+            </div>
+            <div class="form-group">
+                <label>Ответ (необязательно)</label>
+                <textarea name="answer">{html.escape(q['answer'] or '')}</textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Сохранить</button>
+            <a href="{url_for('interview_template_detail', id=q['template_id'])}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Редактировать вопрос шаблона', content=content)
+
+
+@app.route('/interview_templates/question/delete/<int:id>')
+def interview_template_question_delete(id):
+    db = get_db()
+    q = db.execute("SELECT template_id FROM interview_template_question WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if q:
+        db.execute("UPDATE interview_template_question SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+        db.commit()
+        db.close()
+        flash('Вопрос удалён', 'success')
+        return redirect(url_for('interview_template_detail', id=q['template_id']))
+    db.close()
+    flash('Вопрос не найден', 'error')
+    return redirect(url_for('interview_templates_list'))
+
+
+@app.route('/interviews/<int:id>/save_as_template', methods=['GET', 'POST'])
+def interview_save_as_template(id):
+    db = get_db()
+    iv = db.execute("SELECT * FROM interview WHERE id=? AND is_deleted=0", (id,)).fetchone()
+    if not iv:
+        db.close()
+        flash('Интервью не найдено', 'error')
+        return redirect(url_for('interviews_list'))
+    qas = db.execute("SELECT question FROM interview_qa WHERE interview_id=? AND is_deleted=0 ORDER BY id", (id,)).fetchall()
+    if request.method == 'POST':
+        name = (request.form.get('name') or '').strip() or f'Шаблон по интервью #{id}'
+        cur = db.execute("INSERT INTO interview_template (name, description) VALUES (?, ?)",
+                         (name, request.form.get('description') or None))
+        tid = cur.lastrowid
+        for i, q in enumerate(qas):
+            db.execute("INSERT INTO interview_template_question (template_id, question, position) VALUES (?, ?, ?)",
+                       (tid, q['question'], i))
+        db.commit()
+        db.close()
+        flash(f'Создан шаблон из интервью #{id} (вопросов: {len(qas)})', 'success')
+        return redirect(url_for('interview_template_detail', id=tid))
+    db.close()
+    default_name = f'Шаблон по интервью #{id}'
+    content = f'''
+    <div class="card">
+        <h2>Сохранить интервью как шаблон</h2>
+        <p class="muted">В шаблон попадут вопросы интервью (ответы не переносятся): {len(qas)} шт.</p>
+        <form method="POST">
+            <div class="form-group">
+                <label>Название шаблона</label>
+                <input type="text" name="name" value="{html.escape(default_name)}" required>
+            </div>
+            <div class="form-group">
+                <label>Описание</label>
+                <textarea name="description"></textarea>
+            </div>
+            <button type="submit" class="btn btn-success">Создать шаблон</button>
+            <a href="{url_for('interview_detail', id=id)}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Шаблон из интервью', content=content)
 
 
 #==================== АУДИО И ТРАНСКРИПТ ИНТЕРВЬЮ ====================

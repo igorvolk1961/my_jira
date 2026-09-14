@@ -415,6 +415,26 @@ def init_db(path=None):
             text TEXT NOT NULL,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
+
+        -- Шаблоны интервью
+        CREATE TABLE IF NOT EXISTS interview_template (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            description TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+        CREATE TABLE IF NOT EXISTS interview_template_question (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            template_id INTEGER REFERENCES interview_template(id),
+            question TEXT NOT NULL,
+            answer TEXT,
+            position INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
     ''')
     
     # Миграции для существующих БД (добавление новых колонок)
@@ -516,7 +536,56 @@ def init_db(path=None):
     
     # Пользователь по умолчанию (администратор)
     _seed_default_admin(db)
+    _seed_interview_templates(db)
     db.close()
+
+DEFAULT_INTERVIEW_TEMPLATE_NAME = 'Вопросы Заказчику'
+
+# Предзаполненный шаблон (источник: «Вопросы Заказчику.txt»).
+_DEFAULT_INTERVIEW_QUESTIONS = [
+    'Не будете ли Вы возражать, если я буду делать аудиозапись встречи? Это поможет мне ничего не упустить и сосредоточиться на диалоге, а не на конспектировании. (Если "да" – уточнить, можно ли поделиться расшифровкой).',
+    'Кто еще, по Вашему мнению, должен участвовать в обсуждении требований? (Например, ключевые пользователи, ИТ-архитектор, юрист, специалист по безопасности).',
+    'Кто является конечным лицом, принимающим решение (ЛПР) по приемке требований и результата проекта?',
+    'Расскажите, пожалуйста, в чем ключевая идея и главная бизнес-предпосылка проекта? (Что случилось: новый закон, давление конкурентов, внутренние издержки, новая возможность на рынке?)',
+    'По каким конкретным, измеримым критериям (KPI/метрикам) Вы будете оценивать, что проект успешен? (Например: снижение времени обработки заявки на 30%, рост конверсии на 15%).',
+    'Как Вы планируете монетизировать проект или какую экономическую выгоду он должен принести компании?',
+    'Есть ли жесткие дедлайны или привязка к внешним событиям (выставка, изменение законодательства, конец финансового года)?',
+    'Кто целевая аудитория проекта? Можно ли выделить ключевые роли/персоны пользователей?',
+    'Какие цели преследуют эти пользователи и какие задачи они пытаются решить с помощью нашего будущего продукта?',
+    'Как пользователи решают эти задачи сейчас? (Опишите текущий процесс "As-Is").',
+    'С какими основными проблемами, "узкими местами" или "болями" они сталкиваются в текущем процессе?',
+    'Сколько времени у пользователей уходит на выполнение этих задач сейчас? Какой выигрыш по времени или усилиям Вы сочтете приемлемым в новой системе?',
+    'Что должно быть реализовано в рамках MVP (минимально жизнеспособного продукта), чтобы запустить проект?',
+    'Критически важный вопрос: Что мы точно НЕ будем делать в рамках этого проекта? (Что находится за рамками / out of scope).',
+    'Планируете ли Вы масштабирование (расширение) функционала или географии проекта в будущем? Если да, то в каком горизонте?',
+    'На каких устройствах и платформах должен работать проект? (Web, iOS, Android, десктоп, киоски самообслуживания).',
+    'Какова ожидаемая нагрузка? Сколько пользователей будет работать с системой одновременно (пиковая и средняя нагрузка)?',
+    'Какие требования предъявляются к доступности системы? (Например, 99.9% uptime, работа 24/7 или только в рабочие часы).',
+    'Какие у Вас есть требования, касающиеся информационной безопасности, обработки персональных данных (152-ФЗ, GDPR) или отраслевые стандарты (например, PCI DSS для платежей)?',
+    'Должна ли новая система обмениваться данными с существующими системами компании? (Например, 1С, CRM, ERP, сайт). Если да, то знаете ли Вы, есть ли у этих систем готовые API?',
+    'Есть ли необходимость миграции исторических данных из старых систем? В каком виде они сейчас хранятся?',
+    'Кто будет владельцем данных в новой системе и кто отвечает за их актуальность?',
+    'Есть ли определенные рамки по бюджету или стоимости владения (TCO), которые нам нужно учитывать при выборе архитектурных или технологических решений?',
+    'Есть ли предпочтения по технологическому стеку? (Например, "только открытое ПО", "только решения от отечественных вендоров", "уже куплены лицензии на Microsoft").',
+    'Мне нужно обдумать полученную информацию, структурировать ее и, возможно, подготовить уточняющие вопросы. Как нам лучше выстроить дальнейшую коммуникацию? (Формат следующих встреч, каналы связи, сроки предоставления протокола встречи).',
+]
+
+
+def _seed_interview_templates(db):
+    """Идемпотентно создаёт предзаполненный шаблон интервью (если его нет, включая удалённый)."""
+    try:
+        exists = db.execute("SELECT 1 FROM interview_template WHERE name=?", (DEFAULT_INTERVIEW_TEMPLATE_NAME,)).fetchone()
+        if exists:
+            return
+        cur = db.execute("INSERT INTO interview_template (name, description) VALUES (?, ?)",
+                         (DEFAULT_INTERVIEW_TEMPLATE_NAME, 'Базовый набор вопросов для интервью с заказчиком'))
+        tid = cur.lastrowid
+        for i, q in enumerate(_DEFAULT_INTERVIEW_QUESTIONS):
+            db.execute("INSERT INTO interview_template_question (template_id, question, position) VALUES (?, ?, ?)",
+                       (tid, q, i))
+        db.commit()
+    except sqlite3.Error:
+        pass
 
 def _seed_default_admin(db):
     """Идемпотентно создаёт пользователя admin/12345 (роль admin) со связанным сотрудником."""
@@ -713,6 +782,9 @@ ADMIN_WRITE_ENDPOINTS = {
     'event_create', 'event_edit', 'event_delete',
     'interview_create', 'interview_edit', 'interview_delete',
     'interview_qa_create', 'interview_qa_edit', 'interview_qa_delete',
+    'interview_template_create', 'interview_template_delete',
+    'interview_template_question_create', 'interview_template_question_edit',
+    'interview_template_question_delete', 'interview_save_as_template',
     'interview_audio_upload', 'interview_audio_delete',
     'interview_transcribe', 'transcript_edit', 'transcript_segments_save',
     'transcript_clear', 'transcript_segment_delete',
@@ -738,6 +810,7 @@ GET_MUTATION_ENDPOINTS = {
     'database_use', 'database_delete', 'logout',
     'project_remove_stakeholder', 'project_remove_employee',
     'interview_audio_upload', 'interview_audio_delete', 'interview_transcribe',
+    'interview_template_delete', 'interview_template_question_delete',
     'transcript_edit', 'transcript_segments_save', 'transcript_clear', 'transcript_segment_delete',
     'comment_delete', 'subtask_delete', 'task_assignment_delete', 'task_delete',
     'employee_delete', 'stakeholder_delete', 'project_delete', 'requirement_delete',

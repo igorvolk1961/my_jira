@@ -38,6 +38,14 @@
 /interviews/create	interview_create
 /interviews/delete/<int:id>	interview_delete
 /interviews/edit/<int:id>	interview_edit
+/interviews/<int:id>/save_as_template	interview_save_as_template
+/interview_templates	interview_templates_list
+/interview_templates/create	interview_template_create
+/interview_templates/<int:id>	interview_template_detail
+/interview_templates/delete/<int:id>	interview_template_delete
+/interview_templates/<int:id>/question/create	interview_template_question_create
+/interview_templates/question/edit/<int:id>	interview_template_question_edit
+/interview_templates/question/delete/<int:id>	interview_template_question_delete
 /position_types	position_types_list
 /position_types/create	position_type_create
 /position_types/delete/<int:id>	position_type_delete

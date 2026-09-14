@@ -9,6 +9,7 @@
 
 import os
 import shutil
+import sqlite3
 import sys
 
 TEST_DB = 'dev_verify.db'
@@ -66,6 +67,28 @@ def smoke():
     exp = c.get('/interviews/1/export')
     assert exp.status_code == 200 and exp.headers.get('Content-Type', '').startswith('text/markdown')
 
+    # Шаблоны интервью: предзаполненный, интервью по шаблону, шаблон из интервью
+    assert c.get('/interview_templates').status_code == 200
+    tpl_id = None
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    row = con.execute("SELECT id FROM interview_template WHERE name='Вопросы Заказчику' AND is_deleted=0").fetchone()
+    tpl_id = row[0] if row else None
+    tpl_q = con.execute("SELECT COUNT(*) FROM interview_template_question WHERE template_id=? AND is_deleted=0",
+                        (tpl_id,)).fetchone()[0] if tpl_id else 0
+    con.close()
+    assert tpl_id and tpl_q >= 25
+    c.post('/interviews/create', data={'stakeholder_id': '1', 'template_id': str(tpl_id)})
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    iv_id = con.execute("SELECT id FROM interview ORDER BY id DESC LIMIT 1").fetchone()[0]
+    copied = con.execute("SELECT COUNT(*) FROM interview_qa WHERE interview_id=? AND is_deleted=0", (iv_id,)).fetchone()[0]
+    con.close()
+    assert copied == tpl_q
+    c.post('/interviews/1/save_as_template', data={'name': 'Шаблон из smoke'})
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    made = con.execute("SELECT COUNT(*) FROM interview_template WHERE name='Шаблон из smoke' AND is_deleted=0").fetchone()[0]
+    con.close()
+    assert made == 1
+
     # Аудио + транскрипт с посегментными таймкодами
     import io
     r = c.post('/interviews/1/audio', data={'file': (io.BytesIO(b'RIFFfake'), 'rec.wav')},
@@ -75,7 +98,6 @@ def smoke():
     assert c.get('/interviews/audio/1').status_code == 200
 
     # Транскрипт: сегменты создаём напрямую (импорт SRT/VTT/TXT из UI убран)
-    import sqlite3
     con = sqlite3.connect(main.db_path_for(TEST_DB))
     con.execute("INSERT INTO transcript_segment (interview_id, start_ms, end_ms, text) VALUES (1, 1000, 4000, 'Hello')")
     con.execute("INSERT INTO transcript_segment (interview_id, start_ms, end_ms, text) VALUES (1, 5000, 7500, 'World')")

@@ -225,3 +225,26 @@ erDiagram
 - `comment` дополнена `user_id` (FK → `app_user`); `author` заполняется ФИО текущего пользователя.
 - `task_status` содержит статус «Принята к исполнению».
 - `AUDIT_LOG` неизменяем: маршрутов редактирования/удаления нет.
+
+## 11.y Шаблоны интервью
+
+```mermaid
+erDiagram
+    INTERVIEW_TEMPLATE {
+        int id PK
+        string name
+        string description
+    }
+    INTERVIEW_TEMPLATE_QUESTION {
+        int id PK
+        int template_id FK
+        string question
+        string answer
+        int position
+    }
+    INTERVIEW_TEMPLATE ||--o{ INTERVIEW_TEMPLATE_QUESTION : "содержит"
+```
+
+- Новое интервью может создаваться с нуля или по шаблону: вопросы шаблона копируются в `interview_qa`.
+- Шаблон создаётся вручную или из вопросов прошедшего интервью (ответы не переносятся).
+- В `init_db` идемпотентно создаётся предзаполненный шаблон «Вопросы Заказчику» (25 вопросов).
