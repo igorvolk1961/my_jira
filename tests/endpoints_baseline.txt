@@ -14,6 +14,7 @@
 /employees/<int:id>	employee_detail
 /employees/create	employee_create
 /employees/delete/<int:id>	employee_delete
+/employees/role/<int:id>	employee_role_change
 /employees/edit/<int:id>	employee_edit
 /events	events_list
 /events/<int:id>	event_detail

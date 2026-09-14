@@ -217,6 +217,30 @@ def test_employee_delete_allows_others_but_not_self(client):
     assert other.get('/my_tasks').status_code == 302
 
 
+def test_employee_role_change_by_admin_not_self_and_visible_to_all(client):
+    _seed_project_with_user(client)
+    emp = _scalar("SELECT employee_id FROM app_user WHERE login='user1'")
+    client.post(f'/employees/role/{emp}', data={'role': 'admin'})
+    assert _scalar("SELECT role FROM app_user WHERE login='user1'") == 'admin'
+    # свою роль менять нельзя
+    admin_emp = _scalar("SELECT employee_id FROM app_user WHERE login='admin'")
+    client.post(f'/employees/role/{admin_emp}', data={'role': 'user'})
+    assert _scalar("SELECT role FROM app_user WHERE login='admin'") == 'admin'
+    # роль отображается в списке (для всех ролей)
+    html = client.get('/employees').get_data(as_text=True)
+    assert 'Роль' in html and 'администратор' in html
+
+
+def test_employee_role_change_forbidden_for_user(client):
+    _seed_project_with_user(client)
+    client.post('/register', data={'login': 'u3', 'password': 'p', 'last_name': 'Т',
+                                   'first_name': 'Т', 'middle_name': 'Т'})
+    target = _scalar("SELECT employee_id FROM app_user WHERE login='u3'")
+    _login_user(client)
+    client.post(f'/employees/role/{target}', data={'role': 'admin'})
+    assert _scalar("SELECT role FROM app_user WHERE login='u3'") == 'user'
+
+
 def test_database_copy_preserves_data(client):
     _seed_project_with_user(client)
     client.post('/interviews/create', data={'stakeholder_id': '1', 'scheduled_at': '2026-01-01T10:00'})

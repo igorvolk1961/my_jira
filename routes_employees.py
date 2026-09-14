@@ -51,22 +51,26 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
-from app_core import current_user  # noqa: F401
+from app_core import current_user, is_admin  # noqa: F401
 
 #==================== СОТРУДНИКИ ====================
 @app.route('/employees')
 def employees_list():
     db = get_db()
     employees = db.execute("""
-        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available
+        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available,
+               u.id AS user_id, u.role AS user_role
         FROM employee e
         JOIN position_type pt ON e.position_type_id = pt.id
         JOIN employee_status es ON e.status_id = es.id
+        LEFT JOIN app_user u ON u.employee_id = e.id AND u.is_deleted = 0
         WHERE e.is_deleted=0
         ORDER BY e.last_name
     """).fetchall()
     _me = current_user()
     self_emp_id = _me['employee_id'] if _me else None
+    admin = is_admin()
+    role_labels = {'admin': 'администратор', 'user': 'пользователь'}
 
     rows = ''
     for e in employees:
@@ -74,12 +78,25 @@ def employees_list():
         if e['id'] != self_emp_id:
             delete_btn = (f'<a href="{url_for("employee_delete", id=e["id"])}" class="btn btn-danger" '
                           f'onclick="return confirm(\'Удалить?\')">Удалить</a>')
+        if not e['user_id']:
+            role_cell = '<span class="muted">—</span>'
+        elif admin and e['id'] != self_emp_id:
+            opts = ''.join([
+                f'<option value="{r}" {"selected" if r == e["user_role"] else ""}>{label}</option>'
+                for r, label in role_labels.items()])
+            role_cell = (f'<form method="POST" action="{url_for("employee_role_change", id=e["id"])}" '
+                         f'style="display:inline-flex; gap:4px; align-items:center; margin:0;">'
+                         f'<select name="role">{opts}</select>'
+                         f'<button type="submit" class="btn btn-primary" style="margin:0;">OK</button></form>')
+        else:
+            role_cell = role_labels.get(e['user_role'], e['user_role'] or '—')
         rows += f'''
         <tr>
             <td>{e['id']}</td>
             <td class="name-cell">{e['last_name']} {e['first_name']} {e['middle_name'] or ''}</td>
             <td>{e['position_name']}</td>
             <td><span class="badge" style="background: {'#27ae60' if e['is_available'] else '#e74c3c'}">{e['status_name']}</span></td>
+            <td>{role_cell}</td>
             <td>{e['subordinates_total']}</td>
             <td>{e['subordinates_available']}</td>
             <td>
@@ -95,7 +112,7 @@ def employees_list():
         <a href="{url_for('employee_create')}" class="btn btn-success">+ Добавить сотрудника</a>
         <table>
             <thead>
-                <tr><th>ID</th><th>ФИО</th><th>Должность</th><th>Статус</th><th>Всего подчинённых</th><th>Доступно подчинённых</th><th>Действия</th></tr>
+                <tr><th>ID</th><th>ФИО</th><th>Должность</th><th>Статус</th><th>Роль</th><th>Всего подчинённых</th><th>Доступно подчинённых</th><th>Действия</th></tr>
             </thead>
             <tbody>{rows}</tbody>
         </table>
@@ -281,6 +298,31 @@ def employee_delete(id):
     db.commit()
     db.close()
     flash('Сотрудник и связанный пользователь удалены' if linked else 'Сотрудник удалён', 'success')
+    return redirect(url_for('employees_list'))
+
+
+@app.route('/employees/role/<int:id>', methods=['POST'])
+def employee_role_change(id):
+    db = get_db()
+    me = current_user()
+    role = request.form.get('role')
+    if role not in ('admin', 'user'):
+        db.close()
+        flash('Некорректная роль', 'error')
+        return redirect(url_for('employees_list'))
+    user = db.execute("SELECT id FROM app_user WHERE employee_id=? AND is_deleted=0", (id,)).fetchone()
+    if not user:
+        db.close()
+        flash('У сотрудника нет учётной записи пользователя', 'error')
+        return redirect(url_for('employees_list'))
+    if me and me['employee_id'] == id:
+        db.close()
+        flash('Нельзя изменить собственную роль', 'error')
+        return redirect(url_for('employees_list'))
+    db.execute("UPDATE app_user SET role=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (role, user['id']))
+    db.commit()
+    db.close()
+    flash('Роль пользователя обновлена', 'success')
     return redirect(url_for('employees_list'))
 
 

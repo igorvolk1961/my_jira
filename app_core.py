@@ -771,7 +771,7 @@ ADMIN_WRITE_ENDPOINTS = {
     'task_status_create', 'task_status_edit', 'task_status_delete',
     'task_type_create', 'task_type_edit', 'task_type_delete',
     'stakeholder_create', 'stakeholder_edit', 'stakeholder_delete',
-    'employee_create', 'employee_edit', 'employee_delete',
+    'employee_create', 'employee_edit', 'employee_delete', 'employee_role_change',
     'project_create', 'project_edit', 'project_delete',
     'project_add_stakeholder', 'project_remove_stakeholder',
     'project_add_employee', 'project_remove_employee',

@@ -154,6 +154,17 @@ def smoke():
     c.post('/login', data={'login': 'admin', 'password': '12345'})
     assert 'task_create' in c.get('/audit').get_data(as_text=True)
 
+    # Назначение ролей администратором (роль видна в списке сотрудников)
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    dev_emp = con.execute("SELECT employee_id FROM app_user WHERE login='dev_user'").fetchone()[0]
+    con.close()
+    c.post('/employees/role/%d' % dev_emp, data={'role': 'admin'})
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    assert con.execute("SELECT role FROM app_user WHERE login='dev_user'").fetchone()[0] == 'admin'
+    con.close()
+    html = c.get('/employees').get_data(as_text=True)
+    assert 'Роль' in html and 'администратор' in html
+
     print('OK: проверки пройдены на тестовой БД "%s"' % TEST_DB)
 
 
