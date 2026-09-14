@@ -51,16 +51,21 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
+from app_core import current_user, is_admin  # noqa: F401
 
 #==================== КОММЕНТАРИИ ====================
 
 @app.route('/comments/create', methods=['GET', 'POST'])
 def comment_create():
     db = get_db()
+    user = current_user()
+    if not user:
+        db.close()
+        return redirect(url_for('login'))
     if request.method == 'POST':
-        db.execute("INSERT INTO comment (entity_type, entity_id, author, text) VALUES (?, ?, ?, ?)",
+        db.execute("INSERT INTO comment (entity_type, entity_id, author, user_id, text) VALUES (?, ?, ?, ?, ?)",
                    (request.form['entity_type'], int(request.form['entity_id']),
-                    request.form.get('author') or None, request.form['text']))
+                    user['full_name'], user['id'], request.form['text']))
         db.commit()
         db.close()
         flash('Комментарий добавлен', 'success')
@@ -81,12 +86,6 @@ def comment_create():
         row = db.execute("SELECT description FROM subtask WHERE id=? AND is_deleted=0", (int(eid),)).fetchone()
         label = row[0] if row else '—'
     pid = _entity_project_id(db, etype, eid) if eid else None
-    executors = []
-    if pid:
-        executors = db.execute("SELECT e.id, e.last_name, e.first_name FROM project_employee pe JOIN employee e ON pe.employee_id=e.id WHERE pe.project_id=? AND pe.is_deleted=0 AND e.is_deleted=0 ORDER BY e.last_name", (pid,)).fetchall()
-    author_options = '<option value="">— не указан —</option>' + ''.join(
-        [f'<option value="{e["last_name"]} {e["first_name"]}">{e["last_name"]} {e["first_name"]}</option>' for e in executors])
-    author_field = f'<select name="author">{author_options}</select>' if executors else '<input type="text" name="author">'
     type_options = ''.join([f'<option value="{v}" {"selected" if v==etype else ""}">{t}</option>' for v,t in (('task','Задача'),('subtask','Подзадача'))])
     if etype and eid:
         schema_fields = (f'<input type="hidden" name="entity_type" value="{etype}">'
@@ -114,8 +113,8 @@ def comment_create():
             <input type="hidden" name="origin" value="{origin or ''}">
             {schema_fields}
             <div class="form-group">
-                <label>Автор (исполнитель проекта)</label>
-                {author_field}
+                <label>Автор</label>
+                <div class="muted">{html.escape(user['full_name'])}</div>
             </div>
             <div class="form-group">
                 <label>Комментарий</label>
@@ -131,19 +130,28 @@ def comment_create():
 @app.route('/comments/delete/<int:id>')
 def comment_delete(id):
     db = get_db()
+    user = current_user()
     c = db.execute("SELECT * FROM comment WHERE id=? AND is_deleted=0", (id,)).fetchone()
-    if c:
-        db.execute("UPDATE comment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
-        db.commit()
-        origin = request.args.get('origin')
-        if origin:
-            db.close()
-            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
-        eid, etype = c['entity_id'], c['entity_type']
+    if not c:
         db.close()
-        return redirect(url_for('task_detail', id=eid) if etype == 'task' else url_for('subtask_detail', id=eid))
+        flash('Комментарий не найден', 'error')
+        return redirect(url_for('tasks_list'))
+    if not user:
+        db.close()
+        return redirect(url_for('login'))
+    if not is_admin() and c['user_id'] != user['id']:
+        db.close()
+        flash('Можно удалять только свои комментарии', 'error')
+        return redirect(url_for('task_detail', id=c['entity_id']) if c['entity_type'] == 'task'
+                        else url_for('subtask_detail', id=c['entity_id']))
+    db.execute("UPDATE comment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.commit()
+    origin = request.args.get('origin')
+    if origin:
+        db.close()
+        return redirect(url_for('project_detail', id=int(origin), tab='stages'))
+    eid, etype = c['entity_id'], c['entity_type']
     db.close()
-    flash('Комментарий не найден', 'error')
-    return redirect(url_for('tasks_list'))
+    return redirect(url_for('task_detail', id=eid) if etype == 'task' else url_for('subtask_detail', id=eid))
 
 

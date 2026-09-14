@@ -57,7 +57,8 @@ from app_core import (  # noqa: F401
 def employees_list():
     db = get_db()
     employees = db.execute("""
-        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available
+        SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available,
+               (SELECT COUNT(*) FROM app_user u WHERE u.employee_id = e.id AND u.is_deleted = 0) AS linked_user
         FROM employee e
         JOIN position_type pt ON e.position_type_id = pt.id
         JOIN employee_status es ON e.status_id = es.id
@@ -65,7 +66,13 @@ def employees_list():
         ORDER BY e.last_name
     """).fetchall()
 
-    rows = ''.join([f'''
+    rows = ''
+    for e in employees:
+        delete_btn = ''
+        if not e['linked_user']:
+            delete_btn = (f'<a href="{url_for("employee_delete", id=e["id"])}" class="btn btn-danger" '
+                          f'onclick="return confirm(\'Удалить?\')">Удалить</a>')
+        rows += f'''
         <tr>
             <td>{e['id']}</td>
             <td class="name-cell">{e['last_name']} {e['first_name']} {e['middle_name'] or ''}</td>
@@ -76,10 +83,9 @@ def employees_list():
             <td>
                 <a href="{url_for('employee_detail', id=e['id'])}" class="btn btn-success">Открыть</a>
                 <a href="{url_for('employee_edit', id=e['id'])}" class="btn btn-primary">Изменить</a>
-                <a href="{url_for('employee_delete', id=e['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+                {delete_btn}
             </td>
-        </tr>
-    ''' for e in employees])
+        </tr>'''
 
     content = f'''
     <div class="card">
@@ -260,6 +266,11 @@ def employee_edit(id):
 @app.route('/employees/delete/<int:id>')
 def employee_delete(id):
     db = get_db()
+    linked = db.execute("SELECT COUNT(*) FROM app_user WHERE employee_id=? AND is_deleted=0", (id,)).fetchone()[0]
+    if linked:
+        db.close()
+        flash('Сотрудник связан с зарегистрированным пользователем — удаление запрещено', 'error')
+        return redirect(url_for('employees_list'))
     db.execute("UPDATE employee SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
     db.commit()
     db.close()

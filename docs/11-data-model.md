@@ -189,3 +189,39 @@ erDiagram
     COMMENT { int id PK string entity_type "task|subtask" int entity_id string author string text }
     EVENT { int id PK date occurred_at string description string decision }
 ```
+
+## 11.x Аутентификация, аудит и чат (дополнение)
+
+```mermaid
+erDiagram
+    APP_USER {
+        int id PK
+        string login "уникальный"
+        string password "открытый текст (учебный проект)"
+        string role "admin|user"
+        int employee_id FK
+    }
+    SETTING { string key PK string value }
+    AUDIT_LOG {
+        int id PK
+        int user_id FK
+        string user_login
+        string action
+        string entity_type
+        int entity_id
+        int project_id FK
+        int position_id FK
+        string details
+        datetime created_at
+    }
+    CHAT_MESSAGE { int id PK int user_id FK string author string text datetime created_at }
+    APP_USER ||--o| EMPLOYEE : "связан с сотрудником"
+    AUDIT_LOG }o--o| APP_USER : "автор действия"
+    AUDIT_LOG }o--o| PROJECT : "проект действия"
+    CHAT_MESSAGE }o--o| APP_USER : "автор сообщения"
+```
+
+- `task_assignment` дополнена полями `assigned_by_user_id` (FK → `app_user`) и `assigned_at` — кто и когда назначил исполнителя.
+- `comment` дополнена `user_id` (FK → `app_user`); `author` заполняется ФИО текущего пользователя.
+- `task_status` содержит статус «Принята к исполнению».
+- `AUDIT_LOG` неизменяем: маршрутов редактирования/удаления нет.

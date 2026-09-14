@@ -51,12 +51,35 @@ def app_obj():
 
 @pytest.fixture()
 def client(_template_db):
-    """Свежая БД (копия шаблона) и клиент на каждый тест."""
+    """Свежая БД (копия шаблона) и клиент-администратор на каждый тест."""
     shutil.copyfile(main.db_path_for(TEMPLATE_DB), main.db_path_for(TEST_DB))
     shutil.rmtree(main.AUDIO_DIR, ignore_errors=True)
     os.makedirs(main.AUDIO_DIR, exist_ok=True)
     main.app.config.update(TESTING=True)
     with main.app.test_client() as c:
+        c.post('/login', data={'login': 'admin', 'password': '12345'})
+        yield c
+
+
+@pytest.fixture()
+def anon_client(_template_db):
+    """Свежая БД и анонимный клиент (без входа)."""
+    shutil.copyfile(main.db_path_for(TEMPLATE_DB), main.db_path_for(TEST_DB))
+    main.app.config.update(TESTING=True)
+    with main.app.test_client() as c:
+        yield c
+
+
+@pytest.fixture()
+def user_client(_template_db):
+    """Свежая БД и клиент-пользователь (регистрация + вход)."""
+    shutil.copyfile(main.db_path_for(TEMPLATE_DB), main.db_path_for(TEST_DB))
+    main.app.config.update(TESTING=True)
+    with main.app.test_client() as c:
+        c.post('/register', data={
+            'login': 'user1', 'password': 'pw', 'last_name': 'Иванов',
+            'first_name': 'Иван', 'middle_name': 'Иванович'})
+        c.post('/login', data={'login': 'user1', 'password': 'pw'})
         yield c
 
 

@@ -51,6 +51,14 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
+from app_core import (  # noqa: F401
+    _managed_subtask_ids,
+    _user_can_manage_subtask,
+    current_user,
+    get_setting,
+    is_admin,
+    safe_next,
+)
 
 #==================== НАЗНАЧЕНИЯ ЗАДАЧ ====================
 @app.route('/task_assignments')
@@ -100,10 +108,57 @@ def task_assignments_list():
 def task_assignment_create():
     db = get_db()
     if request.method == 'POST':
+        user = current_user()
+        if not user:
+            db.close()
+            return redirect(url_for('login'))
+        admin_mode = is_admin()
         task_id = int(request.form['task_id'])
         kind = request.form['task_kind']
-        emp_id = int(request.form['employee_id'])
+        emp_raw = (request.form.get('employee_id') or '').strip()
         origin = request.form.get('origin')
+
+        def _back():
+            nxt = request.form.get('next')
+            if origin:
+                return url_for('project_detail', id=int(origin), tab='stages')
+            fallback = url_for('task_assignments_list')
+            return safe_next(nxt, fallback)
+
+        # Снятие исполнителя подзадачи (режим «не назначен»)
+        if not emp_raw:
+            if admin_mode:
+                db.close()
+                flash('Выберите исполнителя', 'error')
+                return redirect(_back())
+            if kind != 'subtask' or not _user_can_manage_subtask(db, user['employee_id'], task_id):
+                db.close()
+                flash('Недостаточно прав для снятия исполнителя', 'error')
+                return redirect(_back())
+            existing = db.execute("SELECT id FROM task_assignment WHERE task_id=? AND task_kind='subtask' AND is_deleted=0", (task_id,)).fetchone()
+            if existing:
+                db.execute("UPDATE task_assignment SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (existing['id'],))
+                db.commit()
+            db.close()
+            flash('Исполнитель подзадачи снят', 'success')
+            return redirect(_back())
+
+        emp_id = int(emp_raw)
+        if not admin_mode:
+            if kind != 'subtask':
+                db.close()
+                flash('Пользователь может назначать исполнителей только на подзадачи', 'error')
+                return redirect(_back())
+            if not _user_can_manage_subtask(db, user['employee_id'], task_id):
+                db.close()
+                flash('Недостаточно прав для назначения на эту подзадачу', 'error')
+                return redirect(_back())
+            allow_any = get_setting(db, 'allow_users_assign_subtask_executors', '1') == '1'
+            if not allow_any and emp_id != user['employee_id']:
+                db.close()
+                flash('Настройка запрещает назначать других исполнителей подзадач', 'error')
+                return redirect(_back())
+
         if kind == 'task':
             pid = db.execute("SELECT COALESCE(ps.project_id, r.project_id) FROM task t LEFT JOIN project_stage ps ON t.stage_id=ps.id LEFT JOIN requirement r ON t.requirement_id=r.id WHERE t.id=? AND t.is_deleted=0", (task_id,)).fetchone()
         else:
@@ -113,7 +168,7 @@ def task_assignment_create():
             if not ok:
                 db.close()
                 flash('Исполнитель не назначен на проект задачи', 'error')
-                return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+                return redirect(_back())
         new_share = float(request.form['share'])
         if kind == 'subtask':
             existing = db.execute("SELECT id FROM task_assignment WHERE task_id=? AND task_kind='subtask' AND is_deleted=0", (task_id,)).fetchone()
@@ -125,25 +180,95 @@ def task_assignment_create():
         if cur_load > 1.0 + 1e-9:
             db.close()
             flash(f'Суммарная загрузка сотрудника не может превышать 100% ({round(cur_load * 100)}%)', 'error')
-            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
+            return redirect(_back())
         if kind == 'subtask' and existing:
-            db.execute("UPDATE task_assignment SET employee_id=?, share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (emp_id, new_share, existing['id']))
+            db.execute("""UPDATE task_assignment SET employee_id=?, share=?, assigned_by_user_id=?,
+                          assigned_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                       (emp_id, new_share, user['id'], existing['id']))
             db.commit()
             db.close()
             flash('Исполнитель подзадачи заменён (у подзадачи один исполнитель)', 'success')
-            return redirect(url_for('project_detail', id=int(origin), tab='stages')) if origin else redirect(url_for('task_assignments_list'))
-        db.execute("""INSERT INTO task_assignment (task_id, task_kind, employee_id, share)
-                     VALUES (?, ?, ?, ?)""",
-                  (task_id,
-                   kind,
-                   emp_id,
-                   new_share))
+            return redirect(_back())
+        db.execute("""INSERT INTO task_assignment (task_id, task_kind, employee_id, share, assigned_by_user_id, assigned_at)
+                     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+                   (task_id, kind, emp_id, new_share, user['id']))
         db.commit()
         db.close()
         flash('Назначение создано', 'success')
-        if origin:
-            return redirect(url_for('project_detail', id=int(origin), tab='stages'))
-        return redirect(url_for('task_assignments_list'))
+        return redirect(_back())
+
+    user = current_user()
+    if user and not is_admin():
+        emp = user['employee_id']
+        allow_any = get_setting(db, 'allow_users_assign_subtask_executors', '1') == '1'
+        subtasks = db.execute("SELECT id, description FROM subtask WHERE is_deleted=0 ORDER BY id").fetchall()
+        managed = _managed_subtask_ids(db, emp)
+        manageable = [(s['id'], s['description']) for s in subtasks if s['id'] in managed]
+        task_proj = {}
+        for s in db.execute("""
+            SELECT s.id, COALESCE(ps.project_id, r.project_id) pid FROM subtask s
+            JOIN task t ON s.parent_task_id=t.id
+            LEFT JOIN project_stage ps ON t.stage_id=ps.id
+            LEFT JOIN requirement r ON t.requirement_id=r.id
+            WHERE s.is_deleted=0
+        """):
+            task_proj['subtask:' + str(s['id'])] = s['pid']
+        proj_emp = _project_employee_options(db)
+        db.close()
+        if not manageable:
+            flash('Нет подзадач, доступных вам для назначения исполнителя', 'error')
+            return redirect(url_for('index'))
+        pre_task = request.args.get('task_id')
+        sub_options = ''.join([
+            f'<option value="{sid}" {"selected" if str(sid) == str(pre_task) else ""}>{sid}. {html.escape((desc or "")[:50])}</option>'
+            for sid, desc in manageable])
+        if allow_any:
+            emp_field = '<select name="employee_id" required onchange="setShareDefault()"></select>'
+            extra_script = f'''
+            <script>
+            var taskProject = {json.dumps({k: (str(v) if v else '') for k, v in task_proj.items()})};
+            var projEmployees = {json.dumps({str(k): ''.join(v) for k, v in proj_emp.items()})};
+            function setEmployees() {{
+                var empSel = document.querySelector('select[name=employee_id]');
+                var box = document.querySelector('select[name=task_id]');
+                var pid = taskProject['subtask:' + (box ? box.value : '')];
+                empSel.innerHTML = (pid && projEmployees[pid]) ? projEmployees[pid] : '<option value="">нет сотрудников в команде проекта</option>';
+            }}
+            function setShareDefault() {{
+                document.querySelector('input[name=share]').value = '1.0';
+            }}
+            setEmployees();
+            </script>'''
+        else:
+            self_option = f'<option value="{emp}">{html.escape(user["full_name"])}</option>' if emp else ''
+            emp_field = (f'<select name="employee_id">{self_option}'
+                         '<option value="">— не назначен —</option></select>')
+            extra_script = ''
+        content = f'''
+        <div class="card">
+            <h2>Назначить исполнителя подзадачи</h2>
+            <form method="POST">
+                <input type="hidden" name="task_kind" value="subtask">
+                <div class="form-group">
+                    <label>Подзадача</label>
+                    <select name="task_id" required onchange="{"setEmployees()" if allow_any else ""}">{sub_options}</select>
+                </div>
+                <div class="form-group">
+                    <label>Исполнитель</label>
+                    {emp_field}
+                </div>
+                <div class="form-group">
+                    <label>Доля (0.0 - 1.0)</label>
+                    <input type="number" name="share" step="0.1" min="0" max="1" value="1.0" required>
+                </div>
+                <button type="submit" class="btn btn-success">Сохранить</button>
+                <a href="{url_for('index')}" class="btn btn-primary">Отмена</a>
+            </form>
+        </div>
+        {extra_script}
+        '''
+        return render_template_string(BASE_TEMPLATE, title='Назначение исполнителя', content=content)
+
     tasks = db.execute("SELECT id, description FROM task WHERE is_deleted=0").fetchall()
     subtasks = db.execute("SELECT id, description FROM subtask WHERE is_deleted=0").fetchall()
     employees = db.execute("SELECT id, last_name, first_name FROM employee WHERE is_deleted=0").fetchall()
@@ -279,11 +404,12 @@ def task_assignment_edit(id):
             flash(f'Суммарная загрузка сотрудника не может превышать 100% ({round(cur_load * 100)}%)', 'error')
             return redirect(url_for('task_assignments_list'))
         db.execute("""UPDATE task_assignment SET task_id=?, task_kind=?, employee_id=?,
-                     share=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                     share=?, assigned_by_user_id=?, assigned_at=CURRENT_TIMESTAMP,
+                     updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (task_id,
                    kind,
                    emp_id,
-                   new_share, id))
+                   new_share, (current_user() or {}).get('id'), id))
         db.commit()
         db.close()
         flash('Назначение обновлено', 'success')

@@ -51,6 +51,14 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
+from app_core import (  # noqa: F401
+    _active_task_assignee,
+    _user_can_manage_subtask,
+    assigner_sql,
+    current_user,
+    is_admin,
+    status_form,
+)
 
 #==================== ДЕТАЛЬНЫЕ СТРАНИЦЫ ====================
 
@@ -141,12 +149,17 @@ def task_detail(id):
         db.close()
         flash('Задача не найдена', 'error')
         return redirect(url_for('tasks_list'))
-    executors = db.execute("""
-        SELECT e.id eid, e.last_name, e.first_name, pt.name pos, ta.share
+    executors = db.execute(f"""
+        SELECT e.id eid, e.last_name, e.first_name, pt.name pos, ta.share,
+               {assigner_sql('au', 'ap')} assigner,
+               ta.assigned_at assigned_at
         FROM task_assignment ta JOIN employee e ON ta.employee_id=e.id
         LEFT JOIN position_type pt ON e.position_type_id=pt.id
+        LEFT JOIN app_user ap ON ta.assigned_by_user_id=ap.id
+        LEFT JOIN employee au ON ap.employee_id=au.id
         WHERE ta.task_id=? AND ta.task_kind='task' AND ta.is_deleted=0
     """, (id,)).fetchall()
+    statuses = db.execute("SELECT id, name FROM task_status WHERE is_deleted=0 ORDER BY id").fetchall()
     subtasks = db.execute("""
         SELECT s.id, s.description, s.deadline, pr.name prio, ts.name st, ts.color color
         FROM subtask s JOIN priority pr ON s.priority_id=pr.id
@@ -154,6 +167,8 @@ def task_detail(id):
         WHERE s.parent_task_id=? AND s.is_deleted=0 ORDER BY s.id
     """, (id,)).fetchall()
     comments = db.execute("SELECT * FROM comment WHERE entity_type='task' AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (id,)).fetchall()
+    _u = current_user()
+    can_status = bool(_u and (is_admin() or _active_task_assignee(db, id, _u['employee_id'])))
     db.close()
     info = [
         ('Задача', f'#{id}'),
@@ -167,7 +182,8 @@ def task_detail(id):
         ('Требование', f'<a href="{url_for("requirement_detail", id=t["req_id"])}">{t["req_desc"]}</a>' if t['req_id'] else '-'),
     ]
     rows_exec = [[f'<a href="{url_for("employee_detail", id=e["eid"])}">{e["last_name"]} {e["first_name"]}</a>',
-                  e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
+                  e['pos'] or '-', f'{round(e["share"] * 100)}%',
+                  f'{html.escape(e["assigner"] or "—")} <span class="muted">({e["assigned_at"] or "—"})</span>'] for e in executors]
     rows_sub = [[f'<a href="{url_for("subtask_detail", id=s["id"])}">#{s["id"]}</a>', s['description'][:60], s['prio'],
                  s['deadline'] or '-', f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["st"]}</span>'] for s in subtasks]
     add_comment = f'<a href="{url_for("comment_create", entity_type="task", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
@@ -176,11 +192,14 @@ def task_detail(id):
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
     add_req = f'<a href="{url_for("requirement_create", project_id=t["pid"], task_id=id)}" class="btn btn-success">+ Требование</a>' if t['pid'] else ''
     add_assign = f'<a href="{url_for("task_assignment_create", task_id=id, task_kind="task", origin=t["pid"])}" class="btn btn-warning">Назначить</a>' if t['pid'] else ''
+    status_html = ''
+    if can_status:
+        status_html = status_form('task_status_change', id, statuses, t['status_id'])
     return _detail_page(f'Задача #{id}', info, tables=[
-        {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
+        {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля', 'Назначил'], 'rows': rows_exec},
         {'title': 'Подзадачи ' + add_subtask, 'headers': ['ID', 'Описание', 'Приоритет', 'Срок', 'Статус'], 'rows': rows_sub},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
-    ], actions=add_req + ' ' + add_assign)
+    ], actions=add_req + ' ' + add_assign + ' ' + status_html)
 
 @app.route('/subtasks/<int:id>')
 def subtask_detail(id):
@@ -196,14 +215,21 @@ def subtask_detail(id):
         db.close()
         flash('Подзадача не найдена', 'error')
         return redirect(url_for('subtasks_list'))
-    executors = db.execute("""
-        SELECT e.id eid, e.last_name, e.first_name, pt.name pos, ta.share
+    executors = db.execute(f"""
+        SELECT e.id eid, e.last_name, e.first_name, pt.name pos, ta.share,
+               {assigner_sql('au', 'ap')} assigner,
+               ta.assigned_at assigned_at
         FROM task_assignment ta JOIN employee e ON ta.employee_id=e.id
         LEFT JOIN position_type pt ON e.position_type_id=pt.id
+        LEFT JOIN app_user ap ON ta.assigned_by_user_id=ap.id
+        LEFT JOIN employee au ON ap.employee_id=au.id
         WHERE ta.task_id=? AND ta.task_kind='subtask' AND ta.is_deleted=0
     """, (id,)).fetchall()
+    statuses = db.execute("SELECT id, name FROM task_status WHERE is_deleted=0 ORDER BY id").fetchall()
     comments = db.execute("SELECT * FROM comment WHERE entity_type='subtask' AND entity_id=? AND is_deleted=0 ORDER BY created_at DESC, id DESC", (id,)).fetchall()
     pid = _entity_project_id(db, 'subtask', id)
+    _u = current_user()
+    can_status = bool(_u and (is_admin() or _user_can_manage_subtask(db, _u['employee_id'], id)))
     db.close()
     info = [
         ('Подзадача', f'#{id}'),
@@ -214,17 +240,21 @@ def subtask_detail(id):
         ('Статус', f'<span class="badge" style="background: {s["color"] or "#95a5a6"}">{s["st"]}</span>'),
     ]
     rows_exec = [[f'<a href="{url_for("employee_detail", id=e["eid"])}">{e["last_name"]} {e["first_name"]}</a>',
-                  e['pos'] or '-', f'{round(e["share"] * 100)}%'] for e in executors]
+                  e['pos'] or '-', f'{round(e["share"] * 100)}%',
+                  f'{html.escape(e["assigner"] or "—")} <span class="muted">({e["assigned_at"] or "—"})</span>'] for e in executors]
     add_comment = f'<a href="{url_for("comment_create", entity_type="subtask", entity_id=id)}" class="btn btn-success">+ Комментарий</a>'
     add_subtask = f'<a href="{url_for("subtask_create", parent_subtask_id=id)}" class="btn btn-success">+ Подзадача</a>'
     add_assign = f'<a href="{url_for("task_assignment_create", task_id=id, task_kind="subtask", origin=pid)}" class="btn btn-warning">Назначить</a>' if pid else ''
     rows_c = [[c['created_at'], c['author'] or '-', c['text'],
                f'<a href="{url_for("comment_delete", id=c["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'] for c in comments]
+    status_html = ''
+    if can_status:
+        status_html = status_form('subtask_status_change', id, statuses, s['status_id'])
     return _detail_page(f'Подзадача #{id}', info, [
-        {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля'], 'rows': rows_exec},
+        {'title': 'Кто выполняет', 'headers': ['Сотрудник', 'Должность', 'Доля', 'Назначил'], 'rows': rows_exec},
         {'title': 'Вложенные подзадачи ' + add_subtask, 'headers': ['Действия'], 'rows': []},
         {'title': 'Комментарии ' + add_comment, 'headers': ['Дата', 'Автор', 'Текст', 'Действия'], 'rows': rows_c},
-    ], actions=add_assign)
+    ], actions=add_assign + ' ' + status_html)
 
 @app.route('/stakeholders/<int:id>')
 def stakeholder_detail(id):

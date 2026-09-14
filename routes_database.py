@@ -28,6 +28,8 @@ from app_core import (  # noqa: F401
     app,
     backup_db,
     current_db_name,
+    current_user,
+    is_admin,
     date,
     datetime,
     db_path_for,
@@ -56,7 +58,7 @@ from app_core import (  # noqa: F401
 
 @app.context_processor
 def _inject_current_db():
-    return {'current_db': current_db_name()}
+    return {'current_db': current_db_name(), 'current_user': current_user(), 'is_admin': is_admin()}
 
 def _sanitize_db_name(name):
     name = (name or '').strip()
@@ -134,6 +136,8 @@ def database_use(name):
     if not name or not os.path.exists(db_path_for(name)):
         flash('БД не найдена', 'error')
         return redirect(url_for('database_index'))
+    # Мигрируем/дополняем выбранную БД (идемпотентно), иначе старые БД без новых таблиц дадут 500.
+    init_db(db_path_for(name))
     session['db_name'] = name
     flash(f'Активная БД: {name}', 'success')
     return redirect(url_for('database_index'))

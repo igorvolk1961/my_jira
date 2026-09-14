@@ -73,9 +73,9 @@ def test_comments_on_task(client):
     client.post('/requirements/create', data={'project_id': '1', 'requirement_type_id': '1', 'description': 'R', 'priority_id': '1'})
     client.post('/project_stages/create', data={'project_id': '1', 'stage_type_id': '1', 'status_id': '1'})
     client.post('/tasks/create', data={'requirement_id': '1', 'description': 'T', 'stage_id': '1', 'task_type_id': '1', 'priority_id': '1', 'status_id': '1'})
-    client.post('/comments/create', data={'entity_type': 'task', 'entity_id': '1', 'author': 'Иван', 'text': 'Первый'})
+    client.post('/comments/create', data={'entity_type': 'task', 'entity_id': '1', 'text': 'Первый'})
     html = client.get('/tasks/1').get_data(as_text=True)
-    assert 'Первый' in html and 'Иван' in html
+    assert 'Первый' in html and 'admin' in html
 
 
 def test_database_create_switch_delete(client):

@@ -310,8 +310,11 @@ def project_detail(id):
             return
         ph = ','.join('?' * len(ids))
         rows = db.execute(f"""
-            SELECT ta.*, e.id as eid, e.last_name, e.first_name
+            SELECT ta.*, e.id as eid, e.last_name, e.first_name,
+                   COALESCE(TRIM(au.last_name || ' ' || au.first_name), ap.login, '—') as assigner
             FROM task_assignment ta JOIN employee e ON ta.employee_id = e.id
+            LEFT JOIN app_user ap ON ta.assigned_by_user_id = ap.id
+            LEFT JOIN employee au ON ap.employee_id = au.id
             WHERE ta.is_deleted=0 AND ta.task_kind=? AND ta.task_id IN ({ph})
         """, tuple([kind] + list(ids))).fetchall()
         for a in rows:
@@ -334,7 +337,7 @@ def project_detail(id):
     def render_assignees(lines):
         if not lines:
             return '<span class="muted">исполнители не назначены</span>'
-        items = [f'<a href="{url_for("employee_detail", id=a["eid"])}">{a["last_name"]} {a["first_name"]}</a> ({int(a["share"] * 100)}%)' for a in lines]
+        items = [f'<a href="{url_for("employee_detail", id=a["eid"])}">{html.escape(a["last_name"])} {html.escape(a["first_name"])}</a> ({int(a["share"] * 100)}%, назначил: {html.escape(a["assigner"] or "—")})' for a in lines]
         return 'Исполнители: ' + ', '.join(items)
 
     def render_assignments_block(kind, tid):

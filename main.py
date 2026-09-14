@@ -23,6 +23,11 @@ import routes_details  # noqa: F401
 import routes_interviews  # noqa: F401
 import routes_comments  # noqa: F401
 import routes_database  # noqa: F401
+import routes_auth  # noqa: F401
+import routes_chat  # noqa: F401
+import routes_audit  # noqa: F401
+import routes_settings  # noqa: F401
+import routes_personal  # noqa: F401
 
 
 #==================== ЗАПУСК ПРИЛОЖЕНИЯ ====================

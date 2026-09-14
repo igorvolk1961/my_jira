@@ -51,6 +51,13 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
+from app_core import (  # noqa: F401
+    _active_task_assignee,
+    _user_can_manage_subtask,
+    current_user,
+    is_admin,
+    safe_next,
+)
 
 #==================== ЗАДАЧИ ====================
 @app.route('/tasks')
@@ -394,6 +401,15 @@ def subtask_create():
             db.close()
             flash('Подзадача должна относиться к задаче', 'error')
             return redirect(url_for('subtasks_list'))
+        u = current_user()
+        if u and not is_admin():
+            emp = u['employee_id']
+            allowed = (_user_can_manage_subtask(db, emp, int(psid)) if psid
+                       else _active_task_assignee(db, parent_task_id, emp))
+            if not allowed:
+                db.close()
+                flash('Недостаточно прав: можно создавать подзадачи только в своих задачах', 'error')
+                return redirect(url_for('subtasks_list'))
         db.execute("""INSERT INTO subtask (parent_task_id, parent_subtask_id, description, stage_id, priority_id, deadline, status_id)
                      VALUES (?, ?, ?, ?, ?, ?, ?)""",
                   (parent_task_id, psid,
@@ -485,6 +501,11 @@ def subtask_create():
 @app.route('/subtasks/edit/<int:id>', methods=['GET', 'POST'])
 def subtask_edit(id):
     db = get_db()
+    u = current_user()
+    if u and not is_admin() and not _user_can_manage_subtask(db, u['employee_id'], id):
+        db.close()
+        flash('Недостаточно прав для изменения этой подзадачи', 'error')
+        return redirect(url_for('subtasks_list'))
     if request.method == 'POST':
         db.execute("""UPDATE subtask SET parent_task_id=?, description=?, stage_id=?,
                      priority_id=?, deadline=?, status_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
@@ -562,9 +583,52 @@ def subtask_edit(id):
 @app.route('/subtasks/delete/<int:id>')
 def subtask_delete(id):
     db = get_db()
+    u = current_user()
+    if u and not is_admin() and not _user_can_manage_subtask(db, u['employee_id'], id):
+        db.close()
+        flash('Недостаточно прав для удаления этой подзадачи', 'error')
+        return redirect(url_for('subtasks_list'))
     _soft_delete_subtask_tree(db, id)
     db.commit()
     db.close()
     flash('Подзадача удалена', 'success')
     return redirect(url_for('subtasks_list'))
+
+
+#==================== СМЕНА СТАТУСА ====================
+
+def _change_status(kind, id, detail_endpoint):
+    user = current_user()
+    db = get_db()
+    if not user:
+        db.close()
+        return redirect(url_for('login'))
+    allowed = is_admin()
+    if not allowed:
+        if kind == 'task':
+            allowed = _active_task_assignee(db, id, user['employee_id'])
+        else:
+            allowed = _user_can_manage_subtask(db, user['employee_id'], id)
+    if not allowed:
+        db.close()
+        label = 'задача' if kind == 'task' else 'подзадача'
+        flash(f'Недостаточно прав: {label} назначена не на вас', 'error')
+        return redirect(url_for(detail_endpoint, id=id))
+    sid = request.form.get('status_id')
+    if sid:
+        db.execute(f"UPDATE {kind} SET status_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (int(sid), id))
+        db.commit()
+        flash('Статус обновлён', 'success')
+    db.close()
+    return redirect(safe_next(request.form.get('next'), url_for(detail_endpoint, id=id)))
+
+
+@app.route('/tasks/<int:id>/status', methods=['POST'])
+def task_status_change(id):
+    return _change_status('task', id, 'task_detail')
+
+
+@app.route('/subtasks/<int:id>/status', methods=['POST'])
+def subtask_status_change(id):
+    return _change_status('subtask', id, 'subtask_detail')
 

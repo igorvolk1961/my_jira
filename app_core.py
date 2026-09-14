@@ -4,19 +4,27 @@
 Для ролевых игр на курсах системных аналитиков
 """
 
-from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, session, send_file
+from flask import Flask, render_template_string, request, redirect, url_for, flash, jsonify, session, send_file, g
 from werkzeug.utils import secure_filename
 import sqlite3
 from datetime import datetime, date
 from io import BytesIO
+from functools import wraps
+from urllib.parse import urlsplit
 import html
 import json
 import os
 import re
+import secrets
 import shutil
 
 app = Flask(__name__)
-app.secret_key = os.environ.get('UPO_SECRET_KEY', 'upo_secret_key_2026')
+_secret = os.environ.get('UPO_SECRET_KEY')
+if not _secret:
+    _secret = secrets.token_hex(32)
+    print('ВНИМАНИЕ: UPO_SECRET_KEY не задан — используется случайный ключ сессии '
+          '(сессии не сохраняются между перезапусками). Для продакшена задайте UPO_SECRET_KEY.')
+app.secret_key = _secret
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATABASE_DIR = os.path.join(BASE_DIR, 'data')
@@ -365,6 +373,51 @@ def init_db(path=None):
             is_deleted INTEGER DEFAULT 0
         );
         CREATE INDEX IF NOT EXISTS idx_seg_interview ON transcript_segment(interview_id, start_ms);
+
+        -- Пользователи системы (аутентификация/авторизация)
+        CREATE TABLE IF NOT EXISTS app_user (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            login TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin','user')),
+            employee_id INTEGER REFERENCES employee(id),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+
+        -- Настройки приложения (ключ-значение)
+        CREATE TABLE IF NOT EXISTS setting (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- Журнал аудита (неизменяемый)
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            user_login TEXT,
+            action TEXT NOT NULL,
+            entity_type TEXT,
+            entity_id INTEGER,
+            project_id INTEGER,
+            position_id INTEGER,
+            details TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_log(created_at);
+        CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project_id);
+        CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_log(user_id);
+
+        -- Общий чат
+        CREATE TABLE IF NOT EXISTS chat_message (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER REFERENCES app_user(id),
+            author TEXT NOT NULL,
+            text TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
     ''')
     
     # Миграции для существующих БД (добавление новых колонок)
@@ -384,11 +437,29 @@ def init_db(path=None):
         db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_one_executor_per_subtask ON task_assignment(task_id) WHERE task_kind='subtask' AND is_deleted=0")
     except sqlite3.IntegrityError:
         pass
+    ccols = [r[1] for r in db.execute("PRAGMA table_info(comment)").fetchall()]
+    if 'user_id' not in ccols:
+        db.execute("ALTER TABLE comment ADD COLUMN user_id INTEGER REFERENCES app_user(id)")
+    acols = [r[1] for r in db.execute("PRAGMA table_info(task_assignment)").fetchall()]
+    if 'assigned_by_user_id' not in acols:
+        db.execute("ALTER TABLE task_assignment ADD COLUMN assigned_by_user_id INTEGER REFERENCES app_user(id)")
+    if 'assigned_at' not in acols:
+        db.execute("ALTER TABLE task_assignment ADD COLUMN assigned_at DATETIME")
 
     # Типы задач: отдельное наполнение (для существующих БД, где основные справочники уже есть)
     for ttype in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
                   'Документирование', 'Тестирование', 'Код-ревью'):
         db.execute("INSERT OR IGNORE INTO task_type (name) VALUES (?)", (ttype,))
+
+    # Должность по умолчанию для зарегистрированных пользователей
+    db.execute("INSERT OR IGNORE INTO position_type (name) VALUES (?)", ('Пользователь',))
+
+    # Статус «Принята к исполнению» (для существующих и новых БД)
+    db.execute("INSERT OR IGNORE INTO task_status (name, color) VALUES (?, ?)", ('Принята к исполнению', '#8e44ad'))
+
+    # Настройка по умолчанию
+    db.execute("INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
+               ('allow_users_assign_subtask_executors', '1'))
     db.commit()
     
     # Начальное заполнение справочников
@@ -446,7 +517,34 @@ def init_db(path=None):
         
         db.commit()
     
+    # Пользователь по умолчанию (администратор)
+    _seed_default_admin(db)
     db.close()
+
+def _seed_default_admin(db):
+    """Идемпотентно создаёт пользователя admin/12345 (роль admin) со связанным сотрудником."""
+    try:
+        if db.execute("SELECT 1 FROM app_user WHERE lower(login)='admin'").fetchone():
+            return
+        db.execute("INSERT OR IGNORE INTO position_type (name) VALUES ('Пользователь')")
+        pos = db.execute("SELECT id FROM position_type WHERE lower(name)=lower('Пользователь') ORDER BY id LIMIT 1").fetchone()
+        pos_id = pos[0]
+        db.execute("INSERT OR IGNORE INTO employee_status (name, is_available) VALUES ('Работает', 1)")
+        st = db.execute("SELECT id FROM employee_status WHERE lower(name)=lower('Работает') ORDER BY id LIMIT 1").fetchone()
+        status_id = st[0]
+        emp = db.execute("SELECT id FROM employee WHERE last_name='admin' AND first_name='admin' ORDER BY id LIMIT 1").fetchone()
+        if emp:
+            emp_id = emp[0]
+        else:
+            cur = db.execute("""INSERT INTO employee (last_name, first_name, middle_name, position_type_id, status_id,
+                                subordinates_total, subordinates_available, is_stackholder)
+                                VALUES ('admin', 'admin', 'admin', ?, ?, 0, 0, 0)""", (pos_id, status_id))
+            emp_id = cur.lastrowid
+        db.execute("INSERT OR IGNORE INTO app_user (login, password, role, employee_id) VALUES ('admin', '12345', 'admin', ?)", (emp_id,))
+        db.commit()
+    except sqlite3.IntegrityError:
+        # повторный/конкурентный запуск — запись уже создана другим процессом
+        pass
 
 # ==================== СИНХРОНИЗАЦИЯ «СОТРУДНИК <-> СТЕЙКХОЛДЕР-РАЗРАБОТЧИК» ====================
 
@@ -593,6 +691,492 @@ def _project_employee_options(db):
             f'<option value="{row["id"]}">{row["last_name"]} {row["first_name"]} — {row["pos"]} (загрузка {int(row["load"] * 100)}%)</option>')
     return proj_emp
 
+# ==================== АУТЕНТИФИКАЦИЯ, АВТОРИЗАЦИЯ, АУДИТ ====================
+
+# Защищённые маршруты: admin-изменения
+ADMIN_WRITE_ENDPOINTS = {
+    'priority_create', 'priority_edit', 'priority_delete',
+    'stakeholder_type_create', 'stakeholder_type_edit', 'stakeholder_type_delete',
+    'requirement_type_create', 'requirement_type_edit', 'requirement_type_delete',
+    'position_type_create', 'position_type_edit', 'position_type_delete',
+    'employee_status_create', 'employee_status_edit', 'employee_status_delete',
+    'stage_type_create', 'stage_type_edit', 'stage_type_delete',
+    'stage_status_create', 'stage_status_edit', 'stage_status_delete',
+    'task_status_create', 'task_status_edit', 'task_status_delete',
+    'task_type_create', 'task_type_edit', 'task_type_delete',
+    'stakeholder_create', 'stakeholder_edit', 'stakeholder_delete',
+    'employee_create', 'employee_edit', 'employee_delete',
+    'project_create', 'project_edit', 'project_delete',
+    'project_add_stakeholder', 'project_remove_stakeholder',
+    'project_add_employee', 'project_remove_employee',
+    'requirement_create', 'requirement_edit', 'requirement_delete',
+    'project_stage_create', 'project_stage_edit', 'project_stage_delete',
+    'task_create', 'task_edit', 'task_delete',
+    'task_assignment_edit', 'task_assignment_delete',
+    'event_create', 'event_edit', 'event_delete',
+    'interview_create', 'interview_edit', 'interview_delete',
+    'interview_qa_create', 'interview_qa_edit', 'interview_qa_delete',
+    'interview_audio_upload', 'interview_audio_delete',
+    'interview_transcribe', 'transcript_edit', 'transcript_segments_save',
+    'transcript_clear', 'transcript_segment_delete',
+    'database_create', 'database_delete', 'database_use',
+    # admin-only страницы (GET защищается тем же механизмом)
+    'audit_index', 'settings_index', 'admin_tasks',
+}
+
+# Маршруты, доступные вошедшему пользователю (admin тоже проходит)
+USER_WRITE_ENDPOINTS = {
+    'subtask_create', 'subtask_edit', 'subtask_delete',
+    'task_status_change', 'subtask_status_change',
+    'comment_create', 'comment_delete',
+    'task_assignment_create', 'chat_post',
+    'my_tasks',
+}
+
+WRITE_ENDPOINTS = ADMIN_WRITE_ENDPOINTS | USER_WRITE_ENDPOINTS
+PUBLIC_ENDPOINTS = {'login', 'register', 'logout'}
+
+# GET-ссылки, изменяющие состояние (нужны для аудита, т.к. это не POST)
+GET_MUTATION_ENDPOINTS = {
+    'database_use', 'database_delete', 'logout',
+    'project_remove_stakeholder', 'project_remove_employee',
+    'interview_audio_upload', 'interview_audio_delete', 'interview_transcribe',
+    'transcript_edit', 'transcript_segments_save', 'transcript_clear', 'transcript_segment_delete',
+    'comment_delete', 'subtask_delete', 'task_assignment_delete', 'task_delete',
+    'employee_delete', 'stakeholder_delete', 'project_delete', 'requirement_delete',
+    'project_stage_delete', 'event_delete', 'interview_delete', 'interview_qa_delete',
+    'employee_status_delete', 'position_type_delete', 'priority_delete',
+    'stakeholder_type_delete', 'requirement_type_delete', 'stage_type_delete',
+    'stage_status_delete', 'task_status_delete', 'task_type_delete',
+}
+
+
+def get_setting(db, key, default=None):
+    try:
+        row = db.execute("SELECT value FROM setting WHERE key=?", (key,)).fetchone()
+        return row[0] if row else default
+    except sqlite3.OperationalError:
+        return default
+
+
+def set_setting(db, key, value):
+    db.execute("""INSERT INTO setting (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+                  ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP""",
+               (key, value))
+
+
+def current_user():
+    """Текущий пользователь (dict) или None. Кэшируется в g на время запроса."""
+    if not hasattr(g, 'current_user'):
+        g.current_user = None
+        uid = session.get('user_id')
+        if uid:
+            try:
+                db = get_db()
+                row = db.execute("""
+                    SELECT u.*, e.last_name, e.first_name, e.middle_name, e.position_type_id
+                    FROM app_user u LEFT JOIN employee e ON u.employee_id=e.id
+                    WHERE u.id=? AND u.is_deleted=0
+                """, (uid,)).fetchone()
+                db.close()
+                if row:
+                    name = ' '.join(x for x in (row['last_name'], row['first_name'], row['middle_name']) if x) or row['login']
+                    g.current_user = {
+                        'id': row['id'],
+                        'login': row['login'],
+                        'role': row['role'],
+                        'employee_id': row['employee_id'],
+                        'position_id': row['position_type_id'],
+                        'full_name': name,
+                    }
+            except sqlite3.Error:
+                g.current_user = None
+    return g.current_user
+
+
+def is_admin():
+    u = current_user()
+    return bool(u and u['role'] == 'admin')
+
+
+def _login_redirect():
+    nxt = request.path
+    if request.query_string:
+        nxt += '?' + request.query_string.decode('utf-8', 'ignore')
+    session['next'] = nxt
+    return redirect(url_for('login'))
+
+
+def safe_next(value, fallback):
+    """Возвращает value, только если это локальный путь (защита от open redirect)."""
+    if value and isinstance(value, str) and '\\' not in value:
+        parts = urlsplit(value)
+        if not parts.scheme and not parts.netloc and value.startswith('/') and not value.startswith('//'):
+            return value
+    return fallback
+
+
+def assigner_sql(emp_alias, user_alias, extra_fallback=None):
+    """SQL-выражение «ФИО того, кто назначил» с единым набором fallback-ов."""
+    parts = [f"TRIM({emp_alias}.last_name || ' ' || {emp_alias}.first_name)"]
+    if extra_fallback:
+        parts.append(extra_fallback)
+    parts.append(f"{user_alias}.login")
+    parts.append("'—'")
+    return 'COALESCE(' + ', '.join(parts) + ')'
+
+
+def status_form(endpoint, entity_id, statuses, selected_id, back=None, label='Сменить статус'):
+    """Единая мини-форма смены статуса для карточек и списков."""
+    opts = ''.join(
+        f'<option value="{s["id"]}" {"selected" if s["id"] == selected_id else ""}>{html.escape(s["name"])}</option>'
+        for s in statuses)
+    next_field = f'<input type="hidden" name="next" value="{html.escape(back)}">' if back else ''
+    return (f'<form method="POST" action="{url_for(endpoint, id=entity_id)}" '
+            f'style="display:inline-flex; gap:6px; align-items:center; margin:5px;">'
+            f'<select name="status_id">{opts}</select>{next_field}'
+            f'<button type="submit" class="btn btn-success" style="margin:0;">{label}</button></form>')
+
+
+def login_required(view):
+    @wraps(view)
+    def wrapper(*args, **kwargs):
+        if not current_user():
+            return _login_redirect()
+        return view(*args, **kwargs)
+    return wrapper
+
+
+# ---------- Доступ пользователя к подзадачам («исполнитель приоритетен») ----------
+
+def _active_task_assignee(db, task_id, emp_id):
+    return db.execute("""SELECT 1 FROM task_assignment
+                         WHERE task_id=? AND task_kind='task' AND employee_id=? AND is_deleted=0 LIMIT 1""",
+                      (task_id, emp_id)).fetchone() is not None
+
+
+def _subtask_assignee(db, subtask_id):
+    r = db.execute("""SELECT employee_id FROM task_assignment
+                      WHERE task_id=? AND task_kind='subtask' AND is_deleted=0 LIMIT 1""", (subtask_id,)).fetchone()
+    return r['employee_id'] if r else None
+
+
+def _user_can_manage_subtask(db, emp_id, subtask_id):
+    if not emp_id:
+        return False
+    target = _subtask_assignee(db, subtask_id)
+    if target is not None:
+        return target == emp_id
+    cur = db.execute("SELECT parent_task_id, parent_subtask_id FROM subtask WHERE id=? AND is_deleted=0",
+                     (subtask_id,)).fetchone()
+    if not cur:
+        return False
+    pid, psub = cur['parent_task_id'], cur['parent_subtask_id']
+    while True:
+        if psub:
+            a = _subtask_assignee(db, psub)
+            if a is not None:
+                return a == emp_id
+            r = db.execute("SELECT parent_task_id, parent_subtask_id FROM subtask WHERE id=? AND is_deleted=0",
+                           (psub,)).fetchone()
+            if not r:
+                return False
+            pid, psub = r['parent_task_id'], r['parent_subtask_id']
+        else:
+            return _active_task_assignee(db, pid, emp_id) if pid else False
+
+
+def _managed_subtask_ids(db, emp_id):
+    """Множество подзадач, которыми emp_id управляет, без N+1: одна загрузка карт связей."""
+    if not emp_id:
+        return set()
+    task_asg = {r['task_id']: r['employee_id'] for r in db.execute(
+        "SELECT task_id, employee_id FROM task_assignment WHERE task_kind='task' AND is_deleted=0")}
+    sub_asg = {r['task_id']: r['employee_id'] for r in db.execute(
+        "SELECT task_id, employee_id FROM task_assignment WHERE task_kind='subtask' AND is_deleted=0")}
+    parents = {r['id']: (r['parent_task_id'], r['parent_subtask_id']) for r in db.execute(
+        "SELECT id, parent_task_id, parent_subtask_id FROM subtask WHERE is_deleted=0")}
+
+    def can(sid):
+        target = sub_asg.get(sid)
+        if target is not None:
+            return target == emp_id
+        cur = parents.get(sid)
+        if not cur:
+            return False
+        pid, psub = cur
+        while True:
+            if psub is not None:
+                a = sub_asg.get(psub)
+                if a is not None:
+                    return a == emp_id
+                nxt = parents.get(psub)
+                if not nxt:
+                    return False
+                pid, psub = nxt
+            else:
+                return task_asg.get(pid) == emp_id if pid else False
+
+    return {sid for sid in parents if can(sid)}
+
+
+# ---------- Аудит ----------
+
+def _audit_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _endpoint_entity_type(endpoint):
+    e = endpoint or ''
+    if e in ('task_status_change', 'subtask_status_change'):
+        return 'task' if e == 'task_status_change' else 'subtask'
+    if e == 'task_assignment_create':
+        kind = request.form.get('task_kind')
+        return kind if kind in ('task', 'subtask') else 'assignment'
+    if e.startswith('task_assignment'):
+        return 'assignment'
+    if e.startswith('task_status') or e.startswith('task_type'):
+        return 'reference'
+    if e.startswith('task_'):
+        return 'task'
+    if e.startswith('subtask_'):
+        return 'subtask'
+    if e.startswith('project_stage'):
+        return 'stage'
+    if e.startswith('project_'):
+        return 'project'
+    if e.startswith('requirement'):
+        return 'requirement'
+    if e.startswith('stakeholder_type'):
+        return 'reference'
+    if e.startswith('stakeholder'):
+        return 'stakeholder'
+    if e.startswith('employee_status'):
+        return 'reference'
+    if e.startswith('employee'):
+        return 'employee'
+    if e.startswith('comment'):
+        return 'comment'
+    if e.startswith('chat'):
+        return 'chat'
+    if e.startswith('interview') or e.startswith('transcript'):
+        return 'interview'
+    if e.startswith('event'):
+        return 'event'
+    if e.startswith('database'):
+        return 'database'
+    if e.startswith('priority'):
+        return 'reference'
+    if e.startswith('position_type'):
+        return 'reference'
+    if e.startswith('stage_'):
+        return 'reference'
+    if e.startswith('setting'):
+        return 'setting'
+    if e.startswith('my_tasks'):
+        return 'user'
+    return None
+
+
+def _audit_entity_id():
+    for v in (request.view_args or {}).values():
+        iv = _audit_int(v)
+        if iv is not None:
+            return iv
+    for key in ('entity_id', 'task_id', 'parent_task_id', 'parent_subtask_id', 'id', 'project_id', 'employee_id'):
+        iv = _audit_int(request.form.get(key))
+        if iv is not None:
+            return iv
+    return None
+
+
+def _audit_project_id(db, etype, eid):
+    try:
+        if etype == 'project' and eid:
+            return eid
+        if etype == 'task' and eid:
+            return _entity_project_id(db, 'task', eid)
+        if etype == 'subtask' and eid:
+            return _entity_project_id(db, 'subtask', eid)
+        if etype == 'comment':
+            ce = request.form.get('entity_type')
+            ci = _audit_int(request.form.get('entity_id'))
+            if ce and ci:
+                return _entity_project_id(db, ce, ci)
+        if etype == 'assignment' and eid:
+            r = db.execute("SELECT task_kind, task_id FROM task_assignment WHERE id=?", (eid,)).fetchone()
+            if r:
+                return _entity_project_id(db, r['task_kind'], r['task_id'])
+        if etype == 'requirement' and eid:
+            r = db.execute("SELECT project_id FROM requirement WHERE id=?", (eid,)).fetchone()
+            return r[0] if r else None
+        if etype == 'stage' and eid:
+            r = db.execute("SELECT project_id FROM project_stage WHERE id=?", (eid,)).fetchone()
+            return r[0] if r else None
+    except sqlite3.Error:
+        return None
+    return None
+
+
+def _audit_details():
+    if request.method != 'POST':
+        return None
+    parts = []
+    for k, v in request.form.items():
+        s = '***' if k == 'password' else str(v)
+        if len(s) > 60:
+            s = s[:60] + '…'
+        parts.append(f'{k}={s}')
+    out = '; '.join(parts)
+    return out[:300] if out else None
+
+
+def log_action(action, user=None, entity_type=None, entity_id=None, project_id=None, details=None):
+    try:
+        db = get_db()
+        if entity_type is None:
+            entity_type = _endpoint_entity_type(action)
+        if entity_id is None:
+            entity_id = _audit_entity_id()
+        if project_id is None:
+            project_id = _audit_project_id(db, entity_type, entity_id)
+        if details is None:
+            details = _audit_details()
+        user_login = user['login'] if user else (request.form.get('login') if request.method == 'POST' else None)
+        db.execute("""INSERT INTO audit_log (user_id, user_login, action, entity_type, entity_id,
+                                             project_id, position_id, details)
+                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                   (user['id'] if user else None, user_login, action, entity_type,
+                    entity_id, project_id, user['position_id'] if user else None, details))
+        db.commit()
+        db.close()
+    except sqlite3.Error:
+        pass
+
+
+def _audit_request(user):
+    endpoint = request.endpoint
+    if endpoint not in WRITE_ENDPOINTS and endpoint not in PUBLIC_ENDPOINTS:
+        return
+    if request.method != 'POST' and endpoint not in GET_MUTATION_ENDPOINTS:
+        return
+    log_action(endpoint, user=user)
+
+
+@app.before_request
+def _auth_guard():
+    endpoint = request.endpoint
+    if not endpoint or endpoint == 'static':
+        return None
+    user = current_user()
+    if endpoint in PUBLIC_ENDPOINTS:
+        _audit_request(user)
+        return None
+    if endpoint not in WRITE_ENDPOINTS:
+        return None
+    if endpoint in USER_WRITE_ENDPOINTS:
+        if not user:
+            return _login_redirect()
+        _audit_request(user)
+        return None
+    if not user:
+        return _login_redirect()
+    _audit_request(user)
+    if not is_admin():
+        flash('Недостаточно прав: требуется роль администратора', 'error')
+        return redirect(url_for('index'))
+    return None
+
+
+# ---------- Скрытие контролов изменения для не-админов ----------
+
+_ANCHOR_RE = re.compile(r'<a\b[^>]*?href="([^"]*)"[^>]*>.*?</a>', re.S | re.I)
+_FORM_RE = re.compile(r'<form\b[^>]*?action="([^"]*)"[^>]*>.*?</form>', re.S | re.I)
+
+
+def _url_path(url):
+    if not url or not url.startswith('/'):
+        return ''
+    return url.split('?', 1)[0].split('#', 1)[0]
+
+
+_url_adapter = None
+
+
+def _get_url_adapter():
+    global _url_adapter
+    if _url_adapter is None:
+        try:
+            _url_adapter = app.url_map.bind('localhost')
+        except Exception:
+            return None
+    return _url_adapter
+
+
+def _endpoint_for_path(path):
+    if not path:
+        return None
+    adapter = _get_url_adapter()
+    if adapter is None:
+        return None
+    for method in ('GET', 'POST'):
+        try:
+            return adapter.match(path, method=method)[0]
+        except Exception:
+            continue
+    return None
+
+
+def _control_hidden(endpoint, user):
+    if not endpoint:
+        return False
+    if endpoint in ADMIN_WRITE_ENDPOINTS:
+        return True
+    if not user and endpoint in USER_WRITE_ENDPOINTS:
+        return True
+    return False
+
+
+def _strip_write_controls(text, user):
+    cache = {}
+
+    def hidden_for(url):
+        path = _url_path(url)
+        if path not in cache:
+            cache[path] = _control_hidden(_endpoint_for_path(path), user)
+        return cache[path]
+
+    text = _ANCHOR_RE.sub(lambda m: '' if hidden_for(m.group(1)) else m.group(0), text)
+    text = _FORM_RE.sub(lambda m: '' if hidden_for(m.group(1)) else m.group(0), text)
+    return text
+
+
+_WRITE_URL_TOKENS = ('/create', '/edit/', '/delete/', '/remove_', '/add_', '/status', '/use/', '/upload',
+                     '/save', '/clear', '/transcribe', '/chat/post')
+
+
+@app.after_request
+def _filter_write_controls(response):
+    try:
+        if response.mimetype != 'text/html':
+            return response
+        user = current_user()
+        if user and user['role'] == 'admin':
+            return response
+        data = response.get_data(as_text=True)
+        if not any(tok in data for tok in _WRITE_URL_TOKENS):
+            return response
+        new = _strip_write_controls(data, user)
+        if new != data:
+            response.set_data(new)
+    except Exception:
+        pass
+    return response
+
+
 # ==================== БАЗОВЫЙ ШАБЛОН ====================
 
 BASE_TEMPLATE = '''
@@ -608,8 +1192,12 @@ BASE_TEMPLATE = '''
         .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
         .header { background: #2c3e50; color: white; padding: 20px; margin-bottom: 20px; }
         .header h1 { font-size: 24px; }
-        .nav { background: #34495e; padding: 10px; margin-bottom: 20px; }
+        .nav { background: #34495e; padding: 10px; margin-bottom: 20px; display: flex; flex-wrap: wrap; align-items: center; }
         .nav a { color: white; text-decoration: none; padding: 8px 15px; margin-right: 10px; display: inline-block; }
+        .nav-right { margin-left: auto; display: flex; align-items: center; gap: 6px; color: #bdc3c7; font-size: 13px; }
+        .nav-right a { margin-right: 0; }
+        .nav-right a.login-btn { background: #27ae60; border-radius: 4px; }
+        .nav-right a.logout-btn { background: #e74c3c; border-radius: 4px; }
         .nav a:hover { background: #4a6278; border-radius: 4px; }
         .nav .dropdown { position: relative; display: inline-block; }
         .nav .dropbtn { color: white; text-decoration: none; padding: 8px 15px; margin-right: 10px; display: inline-block; cursor: pointer; }
@@ -701,6 +1289,22 @@ BASE_TEMPLATE = '''
                 <a href="{{ url_for('report_assignments') }}">Назначения: загрузка</a>
                 <a href="{{ url_for('report_events') }}">События: динамика</a>
             </div>
+        </div>
+        {% if is_admin %}
+        <a href="{{ url_for('admin_tasks') }}">Задачи</a>
+        <a href="{{ url_for('audit_index') }}">Аудит</a>
+        <a href="{{ url_for('settings_index') }}">Настройки</a>
+        {% elif current_user %}
+        <a href="{{ url_for('my_tasks') }}">Мои задачи</a>
+        {% endif %}
+        <a href="{{ url_for('chat_index') }}">Чат</a>
+        <div class="nav-right">
+            {% if current_user %}
+                <span>{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }})</span>
+                <a class="logout-btn" href="{{ url_for('logout') }}">Выход</a>
+            {% else %}
+                <a class="login-btn" href="{{ url_for('login') }}">Вход</a>
+            {% endif %}
         </div>
     </div>
     <div class="container">

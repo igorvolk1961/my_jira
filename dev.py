@@ -22,6 +22,7 @@ from main import app  # noqa: E402
 def smoke():
     main.init_db()
     c = app.test_client()
+    c.post('/login', data={'login': 'admin', 'password': '12345'})
 
     # Справочники
     assert c.get('/priorities').status_code == 200
@@ -98,6 +99,26 @@ def smoke():
     # Отчёты, БД
     for p in ['/reports/projects', '/reports/tasks', '/reports/employees', '/database']:
         assert c.get(p).status_code == 200
+
+    # Аутентификация, роли, аудит, чат, настройки, разделы
+    assert c.get('/chat').status_code == 200
+    assert c.get('/audit').status_code == 200
+    assert c.get('/settings').status_code == 200
+    assert c.get('/tasks_admin').status_code == 200
+    for tab in ('unassigned', 'not_accepted', 'overdue'):
+        assert c.get('/tasks_admin?tab=' + tab).status_code == 200
+    r = c.post('/register', data={'login': 'dev_user', 'password': 'pw', 'last_name': 'Дев',
+                                  'first_name': 'Юзер', 'middle_name': 'Тест'})
+    assert r.status_code in (200, 302)
+    c.get('/logout')
+    c.post('/login', data={'login': 'dev_user', 'password': 'pw'})
+    assert c.get('/my_tasks').status_code == 200
+    c.post('/chat/post', data={'text': 'сообщение из smoke'})
+    assert 'сообщение из smoke' in c.get('/chat').get_data(as_text=True)
+    assert c.get('/tasks_admin').status_code == 302  # пользователю нельзя
+    c.get('/logout')
+    c.post('/login', data={'login': 'admin', 'password': '12345'})
+    assert 'task_create' in c.get('/audit').get_data(as_text=True)
 
     print('OK: проверки пройдены на тестовой БД "%s"' % TEST_DB)
 

@@ -118,3 +118,14 @@
 /tasks/create	task_create
 /tasks/delete/<int:id>	task_delete
 /tasks/edit/<int:id>	task_edit
+/tasks/<int:id>/status	task_status_change
+/subtasks/<int:id>/status	subtask_status_change
+/login	login
+/logout	logout
+/register	register
+/chat	chat_index
+/chat/post	chat_post
+/audit	audit_index
+/settings	settings_index
+/my_tasks	my_tasks
+/tasks_admin	admin_tasks
