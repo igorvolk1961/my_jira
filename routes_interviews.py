@@ -36,6 +36,7 @@ from app_core import (  # noqa: F401
     get_db,
     html,
     init_db,
+    is_admin,
     json,
     jsonify,
     os,
@@ -216,11 +217,28 @@ def interview_detail(id):
     add_qa = f'<a href="{url_for("interview_qa_create", interview_id=id)}" class="btn btn-success">+ Добавить вопрос</a>'
     export_btn = f'<a href="{url_for("interview_export", id=id)}" class="btn btn-success">Экспорт (Markdown)</a>'
     save_tpl_btn = f'<a href="{url_for("interview_save_as_template", id=id)}" class="btn btn-warning">Сохранить как шаблон</a>'
-    rows_q = [[f'<a href="{url_for("interview_qa_edit", id=q["id"])}">#{q["id"]}</a>', q['question'], q['answer'] or '-',
-               '<div style="white-space:nowrap">'
-               f'<a href="{url_for("interview_qa_edit", id=q["id"])}" class="btn btn-primary">Изменить</a> '
-               f'<a href="{url_for("interview_qa_delete", id=q["id"])}" class="btn btn-danger" onclick="return confirm(\'Удалить?\')">Удалить</a>'
-               '</div>'] for q in qas]
+    rows_q = []
+    for q in qas:
+        delete_btn = (f'<a href="{url_for("interview_qa_delete", id=q["id"])}" class="btn btn-danger" '
+                      f'onclick="return confirm(\'Удалить?\')">Удалить</a>')
+        if is_admin():
+            fid = f'qa-{q["id"]}'
+            rows_q.append([
+                f'<form id="{fid}" method="POST" action="{url_for("interview_qa_edit", id=q["id"])}">'
+                f'<input type="hidden" name="interview_id" value="{id}"></form>#{q["id"]}',
+                f'<textarea form="{fid}" name="question" required style="width:100%; min-height:60px;">{html.escape(q["question"])}</textarea>',
+                f'<textarea form="{fid}" name="answer" style="width:100%; min-height:60px;">{html.escape(q["answer"] or "")}</textarea>',
+                '<div style="white-space:nowrap">'
+                f'<button type="submit" form="{fid}" class="btn btn-success">Сохранить</button> '
+                f'{delete_btn}</div>',
+            ])
+        else:
+            rows_q.append([
+                f'#{q["id"]}',
+                html.escape(q['question']).replace('\n', '<br>'),
+                html.escape(q['answer'] or '-').replace('\n', '<br>'),
+                delete_btn,
+            ])
 
     rec_controls = (
         '<button type="button" class="btn btn-danger" id="recStart" onclick="startRec()">● Записать</button> '

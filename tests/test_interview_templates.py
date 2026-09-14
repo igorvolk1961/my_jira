@@ -52,3 +52,28 @@ def test_template_created_from_interview(client):
 def test_template_writes_are_admin_only(user_client):
     user_client.post('/interview_templates/create', data={'name': 'X'})
     assert _scalar("SELECT COUNT(*) FROM interview_template WHERE name='X'") == 0
+
+
+def test_interview_qa_inline_edit(client):
+    client.post('/stakeholders/create', data={'last_name': 'П', 'first_name': 'И', 'type_id': '1', 'priority': '3'})
+    client.post('/interviews/create', data={'stakeholder_id': '1'})
+    client.post('/interview_qa/create', data={'interview_id': '1', 'question': 'Старый', 'answer': 'A'})
+    html = client.get('/interviews/1').get_data(as_text=True)
+    assert 'Старый' in html and 'form="qa-1"' in html and 'Сохранить' in html
+    # правка на месте
+    client.post('/interview_qa/edit/1', data={'interview_id': '1', 'question': 'Новый', 'answer': 'B2'})
+    assert _scalar("SELECT question FROM interview_qa WHERE id=1") == 'Новый'
+    assert _scalar("SELECT answer FROM interview_qa WHERE id=1") == 'B2'
+
+
+def test_interview_qa_read_only_for_anonymous(anon_client):
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    con.execute("INSERT INTO stakeholder (last_name, first_name, type_id, priority) VALUES ('П', 'И', 1, 3)")
+    con.execute("INSERT INTO interview (stakeholder_id) VALUES (1)")
+    con.execute("INSERT INTO interview_qa (interview_id, question, answer) VALUES (1, 'Вопрос читателя', 'Ответ')")
+    con.commit()
+    con.close()
+    html = anon_client.get('/interviews/1').get_data(as_text=True)
+    assert 'Вопрос читателя' in html and 'Ответ' in html
+    assert 'form="qa-' not in html
+
