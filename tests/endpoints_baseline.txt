@@ -3,6 +3,7 @@
 /comments/delete/<int:id>	comment_delete
 /database	database_index
 /database/create	database_create
+/database/copy	database_copy
 /database/delete/<name>	database_delete
 /database/use/<name>	database_use
 /employee_statuses	employee_statuses_list

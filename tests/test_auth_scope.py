@@ -1,5 +1,6 @@
 """Аутентификация, авторизация, аудит, чат, автор назначения."""
 
+import os
 import sqlite3
 
 import main
@@ -214,3 +215,31 @@ def test_employee_delete_allows_others_but_not_self(client):
     other = main.app.test_client()
     other.post('/login', data={'login': 'u2', 'password': 'p'})
     assert other.get('/my_tasks').status_code == 302
+
+
+def test_database_copy_preserves_data(client):
+    _seed_project_with_user(client)
+    client.post('/interviews/create', data={'stakeholder_id': '1', 'scheduled_at': '2026-01-01T10:00'})
+    client.post('/interview_qa/create', data={'interview_id': '1', 'question': 'Вопрос?', 'answer': 'Ответ'})
+
+    copy_name = 'pytest_copy.db'
+    copy_path = main.db_path_for(copy_name)
+    try:
+        r = client.post('/database/copy', data={'source': main.DEFAULT_DB_NAME, 'name': 'pytest_copy',
+                                                 'switch': '1'})
+        assert r.status_code == 302
+        assert os.path.exists(copy_path)
+        con = sqlite3.connect(copy_path)
+        try:
+            # Копия не удаляет данные автоматически
+            assert con.execute("SELECT COUNT(*) FROM project").fetchone()[0] >= 1
+            assert con.execute("SELECT COUNT(*) FROM task").fetchone()[0] >= 1
+            assert con.execute("SELECT COUNT(*) FROM app_user WHERE is_deleted=0").fetchone()[0] >= 2
+            assert con.execute("SELECT COUNT(*) FROM interview").fetchone()[0] >= 1
+            assert con.execute("SELECT COUNT(*) FROM interview_qa").fetchone()[0] >= 1
+        finally:
+            con.close()
+    finally:
+        for suffix in ('', '-wal', '-shm'):
+            if os.path.exists(copy_path + suffix):
+                os.remove(copy_path + suffix)

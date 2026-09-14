@@ -63,9 +63,6 @@ def backup_db(path=None):
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         dest = os.path.join(bdir, f'{os.path.basename(path)}_{ts}.db')
         shutil.copy2(path, dest)
-        for old in sorted(os.listdir(bdir)):
-            if len(os.listdir(bdir)) > 20:
-                os.remove(os.path.join(bdir, old))
     except Exception:
         pass
 
@@ -719,7 +716,7 @@ ADMIN_WRITE_ENDPOINTS = {
     'interview_audio_upload', 'interview_audio_delete',
     'interview_transcribe', 'transcript_edit', 'transcript_segments_save',
     'transcript_clear', 'transcript_segment_delete',
-    'database_create', 'database_delete', 'database_use',
+    'database_create', 'database_delete', 'database_use', 'database_copy',
     # admin-only страницы (GET защищается тем же механизмом)
     'audit_index', 'settings_index', 'admin_tasks',
 }

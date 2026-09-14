@@ -79,6 +79,8 @@ def _list_databases():
 def database_index():
     current = current_db_name()
     files = _list_databases()
+    admin = is_admin()
+    preselect = request.args.get('copy') or current
     rows = ''.join([f'''
         <tr>
             <td>{f}
@@ -87,9 +89,37 @@ def database_index():
             <td>{os.path.getsize(db_path_for(f)):,} байт</td>
             <td>
                 {'' if f == current else f'<a href="{url_for("database_use", name=f)}" class="btn btn-primary">Использовать</a> '}
+                {f'<a href="{url_for("database_index", copy=f)}" class="btn btn-warning">Копировать</a> ' if admin else ''}
                 <a href="{url_for("database_delete", name=f)}" class="btn btn-danger" onclick="return confirm(\'Удалить БД?\')">Удалить</a>
             </td>
         </tr>''' for f in files])
+    source_options = ''.join([
+        f'<option value="{f}" {"selected" if f == preselect else ""}>{f}</option>' for f in files])
+    copy_card = f'''
+    <div class="card">
+        <h2>Скопировать БД</h2>
+        <p class="muted" style="margin-top:6px;">
+            Копия файла базы данных — удобно для отдельной БД на урок (каждый урок или два).
+            Копия создаётся без изменений; при необходимости данные удаляются вручную.
+        </p>
+        <form method="POST" action="{url_for('database_copy')}">
+            <div class="form-group">
+                <label>Исходная БД</label>
+                <select name="source" required>{source_options}</select>
+            </div>
+            <div class="form-group">
+                <label>Имя копии</label>
+                <input type="text" name="name" placeholder="например, urok_2" required>
+            </div>
+            <div class="form-group">
+                <label style="font-weight:normal;">
+                    <input type="checkbox" name="switch" value="1" checked style="width:auto; display:inline; margin-right:6px;">
+                    Переключиться на копию
+                </label>
+            </div>
+            <button type="submit" class="btn btn-success">Создать копию</button>
+        </form>
+    </div>''' if admin else ''
     content = f'''
     <div class="card">
         <h2>Управление базой данных</h2>
@@ -105,6 +135,7 @@ def database_index():
             <button type="submit" class="btn btn-success">Создать и переключиться</button>
         </form>
     </div>
+    {copy_card}
     <div class="card">
         <h2>Имеющиеся БД</h2>
         <table>
@@ -128,6 +159,39 @@ def database_create():
         init_db(path)
         flash(f'Создана БД «{name}»', 'success')
     session['db_name'] = name
+    return redirect(url_for('database_index'))
+
+@app.route('/database/copy', methods=['POST'])
+def database_copy():
+    source = _sanitize_db_name(request.form.get('source') or current_db_name())
+    name = _sanitize_db_name(request.form.get('name'))
+    if not source or not os.path.exists(db_path_for(source)):
+        flash('Исходная БД не найдена', 'error')
+        return redirect(url_for('database_index'))
+    if not name:
+        flash('Некорректное имя копии', 'error')
+        return redirect(url_for('database_index'))
+    if name == source:
+        flash('Имя копии должно отличаться от исходной БД', 'error')
+        return redirect(url_for('database_index'))
+    dest = db_path_for(name)
+    if os.path.exists(dest):
+        flash(f'БД «{name}» уже существует', 'error')
+        return redirect(url_for('database_index'))
+    try:
+        # Снимок файла: основной файл и WAL/SHM, если они есть.
+        shutil.copy2(db_path_for(source), dest)
+        for suffix in ('-wal', '-shm'):
+            src_extra = db_path_for(source) + suffix
+            if os.path.exists(src_extra):
+                shutil.copy2(src_extra, dest + suffix)
+        init_db(dest)
+        flash(f'Создана копия «{name}» из «{source}»', 'success')
+        if request.form.get('switch'):
+            session['db_name'] = name
+            flash(f'Активная БД: {name}', 'success')
+    except (OSError, sqlite3.Error) as e:
+        flash(f'Ошибка копирования: {e}', 'error')
     return redirect(url_for('database_index'))
 
 @app.route('/database/use/<name>')

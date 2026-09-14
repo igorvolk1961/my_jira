@@ -100,6 +100,18 @@ def smoke():
     for p in ['/reports/projects', '/reports/tasks', '/reports/employees', '/database']:
         assert c.get(p).status_code == 200
 
+    # Копирование БД (без автоматического удаления данных)
+    copy_path = main.db_path_for('dev_copy.db')
+    assert c.post('/database/copy', data={'source': TEST_DB, 'name': 'dev_copy'}).status_code in (200, 302)
+    assert os.path.exists(copy_path)
+    con = sqlite3.connect(copy_path)
+    assert con.execute("SELECT COUNT(*) FROM project").fetchone()[0] >= 1
+    assert con.execute("SELECT COUNT(*) FROM app_user WHERE is_deleted=0").fetchone()[0] >= 1
+    con.close()
+    for suffix in ('', '-wal', '-shm'):
+        if os.path.exists(copy_path + suffix):
+            os.remove(copy_path + suffix)
+
     # Аутентификация, роли, аудит, чат, настройки, разделы
     assert c.get('/chat').status_code == 200
     assert c.get('/audit').status_code == 200
