@@ -8,7 +8,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY *.py ./
 
-RUN pip install --no-cache-dir flask==3.1.3 gunicorn>=21.2.0
+RUN pip install --no-cache-dir flask==3.1.3 gunicorn>=21.2.0 markdown-it-py>=4.2.0
 
 # Каталог для файлов SQLite-БД и резервных копий (монтируется как volume)
 RUN mkdir -p /app/data

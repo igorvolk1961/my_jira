@@ -53,7 +53,13 @@ def list_projects(db):
 
 
 def current_project_row(db=None):
-    """Текущий проект из сессии; при отсутствии/невалидности — первый активный."""
+    """Текущий проект из сессии; при отсутствии/невалидности — первый активный.
+
+    Результат кэшируется в g на время запроса, чтобы контекст-процессор не
+    открывал БД повторно при каждом рендере.
+    """
+    if db is None and getattr(g, '_current_project_loaded', False):
+        return g._current_project
     own = db is None
     db = db or get_db()
     try:
@@ -64,15 +70,13 @@ def current_project_row(db=None):
         if not row:
             row = db.execute("SELECT * FROM project WHERE is_deleted=0 ORDER BY id LIMIT 1").fetchone()
             session['project_id'] = row['id'] if row else None
+        if own:
+            g._current_project_loaded = True
+            g._current_project = row
         return row
     finally:
         if own:
             db.close()
-
-
-def current_project_id(db=None):
-    row = current_project_row(db)
-    return row['id'] if row else None
 
 
 def project_selector_html(db, current_id, next_url=None):
@@ -995,13 +999,23 @@ def sync_analyst_role_from_position(db, employee_id):
 
 
 def sync_position_from_analyst_role(db, employee_id, want):
-    """Флаг роли is_analyst → должность сотрудника."""
+    """Флаг роли is_analyst → должность сотрудника.
+
+    Должность меняется только при реальном переходе статуса аналитика:
+    назначение роли переводит на аналитическую должность, а снятие — только
+    если текущая должность аналитическая. Иначе обычная смена базовой роли
+    не должна перетирать должность сотрудника.
+    """
+    row = db.execute("SELECT position_type_id FROM employee WHERE id=? AND is_deleted=0", (employee_id,)).fetchone()
+    if not row:
+        return
     if want:
-        pos_id = _analyst_position_id(db)
-        if pos_id:
-            db.execute("UPDATE employee SET position_type_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_deleted=0",
-                       (pos_id, employee_id))
-    else:
+        if not _position_is_analyst(db, row['position_type_id']):
+            pos_id = _analyst_position_id(db)
+            if pos_id:
+                db.execute("UPDATE employee SET position_type_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_deleted=0",
+                           (pos_id, employee_id))
+    elif _position_is_analyst(db, row['position_type_id']):
         pos_id = _default_position_id(db)
         db.execute("UPDATE employee SET position_type_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_deleted=0",
                    (pos_id, employee_id))
@@ -1627,13 +1641,13 @@ def _detail_page(title, info, tables=None, actions=None):
 
 # ==================== ОБЩИЕ БЛОКИ КАРТОЧКИ ПРОЕКТА / АРТЕФАКТОВ ====================
 
-def _project_requirements_html(db, project_id, type_name=None, next_url=None, preset_type_id=None):
+def _project_requirements_html(db, project_id, type_id=None, next_url=None, preset_type_id=None):
     """Таблица требований проекта (общая для вкладки проекта и артефактов №7/№8)."""
     params = [project_id]
     type_filter = ''
-    if type_name:
-        type_filter = ' AND rt.name=?'
-        params.append(type_name)
+    if type_id:
+        type_filter = ' AND rt.id=?'
+        params.append(type_id)
     requirements = db.execute(f"""
         SELECT r.*, s.last_name, s.first_name, rt.name as type_name, pr.name as priority_name
         FROM requirement r

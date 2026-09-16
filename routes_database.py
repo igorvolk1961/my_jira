@@ -37,7 +37,6 @@ from app_core import (  # noqa: F401
     db_path_for,
     flash,
     fmt_timecode,
-    get_db,
     html,
     init_db,
     json,
@@ -60,11 +59,10 @@ from app_core import (  # noqa: F401
 
 @app.context_processor
 def _inject_current_db():
-    db = get_db()
     try:
-        project = current_project_row(db)
-    finally:
-        db.close()
+        project = current_project_row()
+    except sqlite3.Error:
+        project = None
     return {
         'current_db': current_db_name(),
         'current_user': current_user(),
@@ -167,6 +165,7 @@ def database_create():
         return redirect(url_for('database_index'))
     path = db_path_for(name)
     if os.path.exists(path):
+        init_db(path)  # мигрируем существующую БД (идемпотентно)
         flash(f'БД «{name}» уже существует — переключились на неё', 'warning')
     else:
         init_db(path)

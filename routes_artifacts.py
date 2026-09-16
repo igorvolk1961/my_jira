@@ -84,7 +84,7 @@ def _artifact_body(db, artifact, project):
                               (artifact['req_type'],)).fetchone()
         type_id = type_row['id'] if type_row else None
         body, _count = _project_requirements_html(
-            db, project['id'], type_name=artifact['req_type'],
+            db, project['id'], type_id=type_id,
             next_url=url_for('artifact_view', key=artifact['key']), preset_type_id=type_id)
         return body
 

@@ -152,7 +152,7 @@ def requirement_create():
         <h2>Новое требование</h2>
         <form method="POST">
             <input type="hidden" name="task_id" value="{pre_task or ''}">
-            <input type="hidden" name="next" value="{next_url or ''}">
+            <input type="hidden" name="next" value="{html.escape(next_url or '', quote=True)}">
             <div class="form-group">
                 <label>Проект</label>
                 <select name="project_id" required>{project_options}</select>
@@ -178,7 +178,7 @@ def requirement_create():
                 <textarea name="acceptance_criteria"></textarea>
             </div>
             <button type="submit" class="btn btn-success">Создать</button>
-            <a href="{cancel_url}" class="btn btn-primary">Отмена</a>
+            <a href="{html.escape(cancel_url, quote=True)}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''
@@ -233,7 +233,7 @@ def requirement_edit(id):
     <div class="card">
         <h2>Редактировать требование</h2>
         <form method="POST">
-            <input type="hidden" name="next" value="{next_url or ''}">
+            <input type="hidden" name="next" value="{html.escape(next_url or '', quote=True)}">
             <div class="form-group">
                 <label>Проект</label>
                 <select name="project_id" required>{project_options}</select>
@@ -259,7 +259,7 @@ def requirement_edit(id):
                 <textarea name="acceptance_criteria">{req['acceptance_criteria'] or ''}</textarea>
             </div>
             <button type="submit" class="btn btn-success">Сохранить</button>
-            <a href="{next_url or url_for('requirements_list')}" class="btn btn-primary">Отмена</a>
+            <a href="{html.escape(next_url or url_for('requirements_list'), quote=True)}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''

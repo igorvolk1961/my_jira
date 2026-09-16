@@ -17,6 +17,15 @@ def _scalar(sql, params=()):
         con.close()
 
 
+def _exec(sql, params=()):
+    con = sqlite3.connect(main.db_path_for(TEST_DB))
+    try:
+        con.execute(sql, params)
+        con.commit()
+    finally:
+        con.close()
+
+
 def _status_id(name):
     return _scalar("SELECT id FROM task_status WHERE name=?", (name,))
 
@@ -229,6 +238,41 @@ def test_employee_role_change_by_admin_not_self_and_visible_to_all(client):
     # роль отображается в списке (для всех ролей)
     html = client.get('/employees').get_data(as_text=True)
     assert 'Роль' in html and 'администратор' in html
+
+
+def test_role_change_keeps_non_analyst_position(client):
+    """Смена базовой роли не должна перетирать должность сотрудника."""
+    _seed_project_with_user(client)
+    emp = _scalar("SELECT employee_id FROM app_user WHERE login='user1'")
+    arch = _scalar("SELECT id FROM position_type WHERE name='Архитектор'")
+    _exec("UPDATE employee SET position_type_id=? WHERE id=?", (arch, emp))
+    client.post(f'/employees/role/{emp}', data={'role': 'admin'})
+    assert _scalar("SELECT role FROM app_user WHERE login='user1'") == 'admin'
+    assert _scalar("SELECT is_analyst FROM app_user WHERE login='user1'") == 0
+    assert _scalar("SELECT position_type_id FROM employee WHERE id=?", (emp,)) == arch
+
+
+def test_position_and_analyst_role_sync(client):
+    """Должность «Системный аналитик» и роль синхронизируются в обе стороны."""
+    _seed_project_with_user(client)
+    emp = _scalar("SELECT employee_id FROM app_user WHERE login='user1'")
+    analyst = _scalar("SELECT id FROM position_type WHERE name='Системный аналитик'")
+    user_pos = _scalar("SELECT id FROM position_type WHERE name='Пользователь'")
+
+    # должность → роль
+    client.post(f'/employees/edit/{emp}', data={'last_name': 'Иванов', 'first_name': 'Иван',
+                                                'position_type_id': str(analyst), 'status_id': '1'})
+    assert _scalar("SELECT is_analyst FROM app_user WHERE login='user1'") == 1
+
+    # снятие роли → должность «Пользователь»
+    client.post(f'/employees/role/{emp}', data={'role': 'admin'})
+    assert _scalar("SELECT is_analyst FROM app_user WHERE login='user1'") == 0
+    assert _scalar("SELECT position_type_id FROM employee WHERE id=?", (emp,)) == user_pos
+
+    # роль → должность (назначение)
+    client.post(f'/employees/role/{emp}', data={'role': 'admin', 'is_analyst': '1'})
+    assert _scalar("SELECT is_analyst FROM app_user WHERE login='user1'") == 1
+    assert _scalar("SELECT position_type_id FROM employee WHERE id=?", (emp,)) == analyst
 
 
 def test_employee_role_change_forbidden_for_user(client):
