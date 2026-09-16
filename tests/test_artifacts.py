@@ -81,6 +81,51 @@ def test_document_artifact_edit_requires_analyst_or_admin(client):
     assert _scalar("SELECT content FROM project_artifact WHERE artifact_key='vision'") == 'Y'
 
 
+BPMN_XML = ('<?xml version="1.0" encoding="UTF-8"?>'
+            '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL" '
+            'id="Definitions_1" targetNamespace="http://bpmn.io/schema/bpmn">'
+            '<bpmn:process id="Process_1" isExecutable="false"/></bpmn:definitions>')
+
+
+def test_bpmn_artifact_edit_and_view(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    # пустой артефакт
+    empty = client.get('/artifacts/bpmn').get_data(as_text=True)
+    assert 'Диаграмма BPMN не заполнена' in empty
+    # сохранение XML модельером
+    r = client.post('/artifacts/bpmn/edit', data={'content': BPMN_XML})
+    assert r.status_code == 302
+    assert _scalar("SELECT content FROM project_artifact WHERE artifact_key='bpmn'") == BPMN_XML
+    # просмотр в bpmn-js
+    view = client.get('/artifacts/bpmn').get_data(as_text=True)
+    assert 'bpmn-canvas' in view and 'Process_1' in view and 'bpmn-navigated-viewer' in view
+    # страница редактирования подключает модельер
+    edit = client.get('/artifacts/bpmn/edit').get_data(as_text=True)
+    assert 'bpmn-modeler.production.min.js' in edit and 'bpmn-canvas' in edit
+    # очистка
+    client.get('/artifacts/bpmn/clear')
+    assert 'Диаграмма BPMN не заполнена' in client.get('/artifacts/bpmn').get_data(as_text=True)
+
+
+def test_bpmn_static_assets_available(client):
+    for path in ('/static/bpmn/bpmn-modeler.production.min.js',
+                 '/static/bpmn/bpmn-navigated-viewer.production.min.js',
+                 '/static/bpmn/assets/bpmn-js.css',
+                 '/static/bpmn/assets/diagram-js.css',
+                 '/static/bpmn/assets/bpmn-font/css/bpmn-embedded.css'):
+        assert client.get(path).status_code == 200, path
+
+
+def test_bpmn_edit_requires_analyst_or_admin(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    _register(client, 'u9')
+    other = main.app.test_client()
+    other.post('/login', data={'login': 'u9', 'password': 'pw'})
+    r = other.post('/artifacts/bpmn/edit', data={'content': BPMN_XML})
+    assert r.status_code == 302
+    assert _scalar("SELECT COUNT(*) FROM project_artifact WHERE artifact_key='bpmn'") == 0
+
+
 def test_requirements_next_is_escaped(client):
     r = client.get('/requirements/create?next=%22%3E%3Cscript%3Ealert(1)%3C/script%3E')
     body = r.get_data(as_text=True)

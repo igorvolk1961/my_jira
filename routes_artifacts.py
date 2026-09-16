@@ -13,6 +13,7 @@ from app_core import (  # noqa: F401
     flash,
     get_db,
     html,
+    json,
     project_selector_html,
     redirect,
     render_template_string,
@@ -35,7 +36,7 @@ ARTIFACTS = [
      'req_type': 'Функциональное требование'},
     {'key': 'nonfunctional_requirements', 'title': 'Нефункциональные требования', 'kind': 'requirements',
      'req_type': 'Нефункциональное требование'},
-    {'key': 'bpmn', 'title': 'Модель бизнес-процессов (BPMN)', 'kind': 'document'},
+    {'key': 'bpmn', 'title': 'Модель бизнес-процессов (BPMN)', 'kind': 'bpmn'},
     {'key': 'state_machines', 'title': 'Диаграммы состояний', 'kind': 'document'},
     {'key': 'data_model', 'title': 'Модель данных (ER)', 'kind': 'document'},
     {'key': 'prototype', 'title': 'Прототип и навигация', 'kind': 'document'},
@@ -71,6 +72,30 @@ def _no_project_page(title):
     return render_template_string(BASE_TEMPLATE, title=title, content=content)
 
 
+_BPMN_CSS = (
+    'bpmn/assets/diagram-js.css',
+    'bpmn/assets/bpmn-js.css',
+    'bpmn/assets/bpmn-font/css/bpmn-embedded.css',
+)
+
+
+def _bpmn_head_html():
+    return ''.join(f'<link rel="stylesheet" href="{url_for("static", filename=p)}">' for p in _BPMN_CSS)
+
+
+def _artifact_row(db, artifact, project):
+    return db.execute("SELECT * FROM project_artifact WHERE project_id=? AND artifact_key=? AND is_deleted=0",
+                      (project['id'], artifact['key'])).fetchone()
+
+
+def _artifact_actions(artifact, clear_label='Очистить'):
+    if not can_edit_artifacts():
+        return ''
+    return (f'<a href="{url_for("artifact_edit", key=artifact["key"])}" class="btn btn-primary">Изменить</a>'
+            f'<a href="{url_for("artifact_clear", key=artifact["key"])}" class="btn btn-danger" '
+            f'onclick="return confirm(\'{clear_label}?\')">{clear_label}</a>')
+
+
 def _artifact_body(db, artifact, project):
     kind = artifact['kind']
     if kind == 'stakeholders':
@@ -89,16 +114,30 @@ def _artifact_body(db, artifact, project):
             show_nfr_type=(artifact['key'] == 'nonfunctional_requirements'))
         return body
 
-    row = db.execute("SELECT * FROM project_artifact WHERE project_id=? AND artifact_key=? AND is_deleted=0",
-                     (project['id'], artifact['key'])).fetchone()
-    actions = ''
-    if can_edit_artifacts():
-        actions = (f'<a href="{url_for("artifact_edit", key=artifact["key"])}" class="btn btn-primary">Изменить</a>'
-                   f'<a href="{url_for("artifact_clear", key=artifact["key"])}" class="btn btn-danger" '
-                   f'onclick="return confirm(\'Очистить артефакт?\')">Очистить</a>')
+    row = _artifact_row(db, artifact, project)
+    actions = _artifact_actions(artifact)
+    meta = f'<p class="muted" style="margin:8px 0;">Обновлено: {row["updated_at"]}</p>' if row else ''
+
+    if kind == 'bpmn':
+        if row and row['content']:
+            canvas = '<div id="bpmn-canvas" style="height:560px; background:#fff; border:1px solid #ddd;"></div>'
+            script = f'''{_bpmn_head_html()}
+            <script src="{url_for('static', filename='bpmn/bpmn-navigated-viewer.production.min.js')}"></script>
+            <script>
+            (function() {{
+                var viewer = new BpmnJS({{ container: '#bpmn-canvas' }});
+                viewer.importXML({json.dumps(row['content'])}).catch(function(err) {{
+                    document.getElementById('bpmn-canvas').innerHTML =
+                        '<p class="muted" style="padding:10px;">Не удалось отобразить диаграмму.</p>';
+                }});
+            }})();
+            </script>'''
+            return f'{actions}{meta}{canvas}{script}'
+        return f'''{actions}<p class="muted" style="margin:10px 0;">Диаграмма BPMN не заполнена.
+            Нажмите «Изменить», чтобы построить модель.</p>'''
+
     if row and row['content']:
         rendered = _render_markdown(row['content'])
-        meta = f'<p class="muted" style="margin:8px 0;">Обновлено: {row["updated_at"] or "-"}</p>'
     else:
         rendered = f'<p class="muted" style="margin:10px 0;">{_DOCUMENT_HINT}</p>'
         meta = ''
@@ -135,8 +174,8 @@ def artifact_view(key):
 @app.route('/artifacts/<key>/edit', methods=['GET', 'POST'])
 def artifact_edit(key):
     artifact = ARTIFACTS_BY_KEY.get(key)
-    if not artifact or artifact['kind'] != 'document':
-        flash('Артефакт не найден или не поддерживает правку текста', 'error')
+    if not artifact or artifact['kind'] not in ('document', 'bpmn'):
+        flash('Артефакт не найден или не поддерживает правку', 'error')
         return redirect(url_for('artifact_view', key=key))
     db = get_db()
     project = current_project_row(db)
@@ -165,6 +204,44 @@ def artifact_edit(key):
                      (project['id'], artifact['key'])).fetchone()
     current_text = row['content'] if row and row['content'] else ''
     db.close()
+
+    if artifact['kind'] == 'bpmn':
+        content = f'''
+        <div class="card">
+            <h2>{html.escape(artifact['title'])}</h2>
+            <p class="muted" style="margin:6px 0 12px;">Проект: {html.escape(project['name'])}</p>
+            <form method="POST" id="bpmn-form">
+                <input type="hidden" name="content" id="bpmn-xml">
+                <button type="submit" class="btn btn-success">Сохранить</button>
+                <a href="{url_for('artifact_view', key=key)}" class="btn btn-primary">Отмена</a>
+            </form>
+            <div id="bpmn-canvas" style="height:600px; margin-top:12px; background:#fff; border:1px solid #ddd;"></div>
+        </div>
+        {_bpmn_head_html()}
+        <script src="{url_for('static', filename='bpmn/bpmn-modeler.production.min.js')}"></script>
+        <script>
+        (function() {{
+            var initialXml = {json.dumps(current_text)};
+            var modeler = new BpmnJS({{ container: '#bpmn-canvas' }});
+            var loading = initialXml ? modeler.importXML(initialXml) : modeler.createDiagram();
+            loading.catch(function(err) {{
+                document.getElementById('bpmn-canvas').innerHTML =
+                    '<p class="muted" style="padding:10px;">Не удалось загрузить диаграмму.</p>';
+            }});
+            document.getElementById('bpmn-form').addEventListener('submit', function(ev) {{
+                ev.preventDefault();
+                modeler.saveXML({{ format: true }}).then(function(result) {{
+                    document.getElementById('bpmn-xml').value = result.xml;
+                    ev.target.submit();
+                }}).catch(function() {{
+                    alert('Не удалось сохранить диаграмму.');
+                }});
+            }});
+        }})();
+        </script>
+        '''
+        return render_template_string(BASE_TEMPLATE, title='Редактировать: ' + artifact['title'], content=content)
+
     content = f'''
     <div class="card">
         <h2>{html.escape(artifact['title'])}</h2>
@@ -185,7 +262,7 @@ def artifact_edit(key):
 @app.route('/artifacts/<key>/clear')
 def artifact_clear(key):
     artifact = ARTIFACTS_BY_KEY.get(key)
-    if not artifact or artifact['kind'] != 'document':
+    if not artifact or artifact['kind'] not in ('document', 'bpmn'):
         flash('Артефакт не найден или не поддерживает очистку', 'error')
         return redirect(url_for('artifact_view', key=key))
     db = get_db()

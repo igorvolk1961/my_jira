@@ -7,6 +7,7 @@ WORKDIR /app
 
 COPY pyproject.toml ./
 COPY *.py ./
+COPY static ./static
 
 RUN pip install --no-cache-dir flask==3.1.3 gunicorn>=21.2.0 markdown-it-py>=4.2.0
 
