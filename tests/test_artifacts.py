@@ -107,6 +107,54 @@ def test_bpmn_artifact_edit_and_view(client):
     assert 'Диаграмма BPMN не заполнена' in client.get('/artifacts/bpmn').get_data(as_text=True)
 
 
+def test_user_stories_editor_and_markdown(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    r = client.post('/artifacts/user_stories/create',
+                    data={'section': 'Требования', 'role': 'администратор', 'want': 'видеть отчёт',
+                          'benefit': 'контролировать сроки'})
+    assert r.status_code == 302
+    assert _scalar("SELECT identifier FROM user_story WHERE project_id=1") == 'US-1'
+    body = client.get('/artifacts/user_stories').get_data(as_text=True)
+    assert 'US-1' in body and 'Показать Markdown' in body and 'видеть отчёт' in body
+    # группировка по разделам в таблице
+    assert 'us-section' in body and 'Требования' in body
+    # markdown-исходник сгруппирован по разделам и рендерится
+    assert '## Требования' in body and '- **US-1**: Как администратор' in body
+    # редактирование (в т.ч. смена раздела)
+    sid = _scalar("SELECT id FROM user_story WHERE project_id=1")
+    client.post(f'/artifacts/user_stories/edit/{sid}',
+                data={'section': 'Отчёты', 'role': 'Р', 'want': 'W', 'benefit': 'B'})
+    assert _scalar("SELECT want FROM user_story WHERE id=?", (sid,)) == 'W'
+    assert _scalar("SELECT section FROM user_story WHERE id=?", (sid,)) == 'Отчёты'
+    # идентификаторы инкрементируются
+    client.post('/artifacts/user_stories/create', data={'role': 'r', 'want': 'w', 'benefit': 'b'})
+    assert _scalar("SELECT identifier FROM user_story WHERE project_id=1 AND id=2") == 'US-2'
+    # удаление
+    client.get(f'/artifacts/user_stories/delete/{sid}')
+    assert _scalar("SELECT is_deleted FROM user_story WHERE id=?", (sid,)) == 1
+
+
+def test_user_stories_requires_analyst_or_admin(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    _register(client, 'u7')
+    other = main.app.test_client()
+    other.post('/login', data={'login': 'u7', 'password': 'pw'})
+    other.post('/artifacts/user_stories/create', data={'role': 'r', 'want': 'w', 'benefit': 'b'})
+    assert _scalar("SELECT COUNT(*) FROM user_story") == 0
+
+
+def test_empty_artifact_hint_respects_rights(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    # администратор видит кнопку и подсказку про неё
+    admin_body = client.get('/artifacts/bpmn').get_data(as_text=True)
+    assert '/artifacts/bpmn/edit' in admin_body and 'Нажмите «Изменить»' in admin_body
+    # аноним не видит кнопку и получает подсказку про вход
+    client.get('/logout')
+    anon_body = client.get('/artifacts/bpmn').get_data(as_text=True)
+    assert '/artifacts/bpmn/edit' not in anon_body
+    assert 'войдите в систему' in anon_body
+
+
 def test_bpmn_static_assets_available(client):
     for path in ('/static/bpmn/bpmn-modeler.production.min.js',
                  '/static/bpmn/bpmn-navigated-viewer.production.min.js',

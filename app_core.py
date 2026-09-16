@@ -518,6 +518,19 @@ def init_db(path=None):
             is_deleted INTEGER DEFAULT 0,
             UNIQUE(project_id, artifact_key)
         );
+
+        -- Пользовательские истории (артефакт user_stories)
+        CREATE TABLE IF NOT EXISTS user_story (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+            identifier TEXT,
+            role TEXT,
+            want TEXT,
+            benefit TEXT,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
     ''')
     
     # Миграции для существующих БД (добавление новых колонок)
@@ -555,6 +568,9 @@ def init_db(path=None):
     rcols = [r[1] for r in db.execute("PRAGMA table_info(requirement)").fetchall()]
     if 'nfr_type_id' not in rcols:
         db.execute("ALTER TABLE requirement ADD COLUMN nfr_type_id INTEGER REFERENCES nonfunctional_requirement_type(id)")
+    uscols = [r[1] for r in db.execute("PRAGMA table_info(user_story)").fetchall()]
+    if 'section' not in uscols:
+        db.execute("ALTER TABLE user_story ADD COLUMN section TEXT")
 
     # Типы нефункциональных требований: предзаполнение (для новых и существующих БД)
     for nfr in NONFUNCTIONAL_REQUIREMENT_TYPES:
@@ -905,6 +921,7 @@ USER_WRITE_ENDPOINTS = {
 ANALYST_WRITE_ENDPOINTS = {
     'requirement_create', 'requirement_edit', 'requirement_delete',
     'artifact_edit', 'artifact_clear',
+    'user_story_create', 'user_story_edit', 'user_story_delete',
 }
 
 WRITE_ENDPOINTS = ADMIN_WRITE_ENDPOINTS | USER_WRITE_ENDPOINTS | ANALYST_WRITE_ENDPOINTS
@@ -919,7 +936,7 @@ GET_MUTATION_ENDPOINTS = {
     'transcript_edit', 'transcript_segments_save', 'transcript_clear', 'transcript_segment_delete',
     'comment_delete', 'subtask_delete', 'task_assignment_delete', 'task_delete',
     'employee_delete', 'stakeholder_delete', 'project_delete', 'requirement_delete',
-    'artifact_clear',
+    'artifact_clear', 'user_story_delete',
     'project_stage_delete', 'event_delete', 'interview_delete', 'interview_qa_delete',
     'employee_status_delete', 'position_type_delete', 'priority_delete',
     'stakeholder_type_delete', 'requirement_type_delete',

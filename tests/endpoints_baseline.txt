@@ -2,6 +2,9 @@
 /artifacts/<key>	artifact_view
 /artifacts/<key>/clear	artifact_clear
 /artifacts/<key>/edit	artifact_edit
+/artifacts/user_stories/create	user_story_create
+/artifacts/user_stories/delete/<int:id>	user_story_delete
+/artifacts/user_stories/edit/<int:id>	user_story_edit
 /comments/create	comment_create
 /comments/delete/<int:id>	comment_delete
 /database	database_index

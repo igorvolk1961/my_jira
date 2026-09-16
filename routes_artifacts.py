@@ -30,7 +30,7 @@ ARTIFACTS = [
     {'key': 'glossary', 'title': 'Глоссарий', 'kind': 'document'},
     {'key': 'stakeholders', 'title': 'Заинтересованные лица', 'kind': 'stakeholders'},
     {'key': 'personas', 'title': 'Персоны', 'kind': 'document'},
-    {'key': 'user_stories', 'title': 'Пользовательские истории', 'kind': 'document'},
+    {'key': 'user_stories', 'title': 'Пользовательские истории', 'kind': 'user_stories'},
     {'key': 'use_cases', 'title': 'Варианты использования', 'kind': 'document'},
     {'key': 'functional_requirements', 'title': 'Функциональные требования', 'kind': 'requirements',
      'req_type': 'Функциональное требование'},
@@ -46,7 +46,14 @@ ARTIFACTS = [
 
 ARTIFACTS_BY_KEY = {a['key']: a for a in ARTIFACTS}
 
-_DOCUMENT_HINT = 'Артефакт не заполнен. Нажмите «Изменить», чтобы добавить содержимое (поддерживается Markdown).'
+def _empty_hint(prefix, action):
+    """Подсказка для пустого артефакта — с учётом прав текущего пользователя."""
+    if can_edit_artifacts():
+        return f'{prefix} Нажмите «Изменить», чтобы {action}.'
+    if current_user():
+        return (f'{prefix} Редактирование доступно администратору и системному аналитику '
+                f'(текущая роль не позволяет правку).')
+    return f'{prefix} Для редактирования войдите в систему (роль «Системный аналитик»).'
 
 # ==================== ТЕКУЩИЙ ПРОЕКТ ====================
 
@@ -96,8 +103,111 @@ def _artifact_actions(artifact, clear_label='Очистить'):
             f'onclick="return confirm(\'{clear_label}?\')">{clear_label}</a>')
 
 
+def _user_stories(db, project_id):
+    return db.execute("SELECT * FROM user_story WHERE project_id=? AND is_deleted=0 ORDER BY id",
+                      (project_id,)).fetchall()
+
+
+def _user_story_groups(stories):
+    """{раздел: [истории]} с сохранением порядка; пустой раздел — в конце."""
+    groups = {}
+    for s in stories:
+        groups.setdefault((s['section'] or '').strip(), []).append(s)
+    return groups
+
+
+def _user_stories_markdown(stories):
+    if not stories:
+        return '# Пользовательские истории\n\nИстории не заданы.\n'
+    groups = _user_story_groups(stories)
+    lines = ['# Пользовательские истории', '']
+    for key in [k for k in groups if k] + ([''] if '' in groups else []):
+        lines.append(f'## {key}' if key else '## Без раздела')
+        lines.append('')
+        for s in groups[key]:
+            lines.append(f'- **{s["identifier"] or "US"}**: Как {s["role"] or "…"}, '
+                         f'я хочу {s["want"] or "…"}, чтобы {s["benefit"] or "…"}.')
+        lines.append('')
+    return '\n'.join(lines).rstrip() + '\n'
+
+
+def _user_stories_html(db, project_id):
+    stories = _user_stories(db, project_id)
+    can_edit = can_edit_artifacts()
+    groups = _user_story_groups(stories)
+    sections = [k for k in groups if k]
+    datalist = '<datalist id="us-sections">' + ''.join(
+        f'<option value="{html.escape(k, quote=True)}"></option>' for k in sections) + '</datalist>'
+
+    forms = ''
+    rows = ''
+    if not stories:
+        rows = '<tr><td colspan="5" class="muted">Истории не заданы.</td></tr>'
+    for key in [k for k in groups if k] + ([''] if '' in groups else []):
+        rows += f'<tr class="us-section" style="background:#ecf0f1;"><td colspan="5"><strong>{html.escape(key) if key else "Без раздела"}</strong></td></tr>'
+        for s in groups[key]:
+            ident = html.escape(s['identifier'] or f'US-{s["id"]}')
+            if can_edit:
+                fid = f'story-{s["id"]}'
+                forms += f'<form id="{fid}" method="POST" action="{url_for("user_story_edit", id=s["id"])}"></form>'
+                rows += f'''<tr>
+                    <td class="name-cell">{ident}
+                        <input name="section" form="{fid}" value="{html.escape(s['section'] or '', quote=True)}" list="us-sections" placeholder="Раздел" style="width:100%; margin-top:4px;"></td>
+                    <td><input name="role" form="{fid}" value="{html.escape(s['role'] or '')}" placeholder="Как…" style="width:100%;"></td>
+                    <td><input name="want" form="{fid}" value="{html.escape(s['want'] or '')}" placeholder="я хочу…" style="width:100%;"></td>
+                    <td><input name="benefit" form="{fid}" value="{html.escape(s['benefit'] or '')}" placeholder="чтобы…" style="width:100%;"></td>
+                    <td style="white-space:nowrap;">
+                        <button type="submit" form="{fid}" class="btn btn-success">Сохранить</button>
+                        <a href="{url_for('user_story_delete', id=s['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+                    </td>
+                </tr>'''
+            else:
+                rows += f'''<tr>
+                    <td class="name-cell">{ident}</td>
+                    <td>{html.escape(s['role'] or '-')}</td>
+                    <td>{html.escape(s['want'] or '-')}</td>
+                    <td>{html.escape(s['benefit'] or '-')}</td>
+                    <td></td>
+                </tr>'''
+
+    add_form = ''
+    if can_edit:
+        add_form = f'''
+        {datalist}
+        <form method="POST" action="{url_for('user_story_create')}" style="display:flex; gap:6px; flex-wrap:wrap; margin-top:12px;">
+            <input name="section" placeholder="Раздел" list="us-sections" style="flex:1; min-width:160px;">
+            <input name="role" placeholder="Как…" style="flex:1; min-width:160px;" required>
+            <input name="want" placeholder="я хочу…" style="flex:1; min-width:160px;" required>
+            <input name="benefit" placeholder="чтобы…" style="flex:1; min-width:160px;" required>
+            <button type="submit" class="btn btn-success">+ Добавить историю</button>
+        </form>'''
+
+    md = _user_stories_markdown(stories)
+    md_rendered = _render_markdown(md)
+    toggle = ('<button type="button" class="btn btn-primary" '
+              'onclick="var p=document.getElementById(\'us-markdown\'); '
+              'p.style.display = (p.style.display === \'block\' ? \'none\' : \'block\');">Показать Markdown</button>'
+              '<div id="us-markdown" style="display:none; margin-top:12px;">'
+              '<h3>Markdown (исходник)</h3>'
+              '<textarea readonly style="width:100%; min-height:160px; font-family:monospace;">'
+              + html.escape(md) +
+              '</textarea><h3>Просмотр</h3><div class="markdown-body">'
+              + md_rendered + '</div></div>')
+
+    return f'''
+        {forms}
+        <table>
+            <thead><tr><th>ID</th><th>Как…</th><th>Я хочу…</th><th>Чтобы…</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+        {add_form}
+        <div style="margin-top:12px;">{toggle}</div>'''
+
+
 def _artifact_body(db, artifact, project):
     kind = artifact['kind']
+    if kind == 'user_stories':
+        return _user_stories_html(db, project['id'])
     if kind == 'stakeholders':
         body, _count = _project_stakeholders_html(db, project['id'])
         return body
@@ -133,13 +243,14 @@ def _artifact_body(db, artifact, project):
             }})();
             </script>'''
             return f'{actions}{meta}{canvas}{script}'
-        return f'''{actions}<p class="muted" style="margin:10px 0;">Диаграмма BPMN не заполнена.
-            Нажмите «Изменить», чтобы построить модель.</p>'''
+        hint = _empty_hint('Диаграмма BPMN не заполнена.', 'построить модель')
+        return f'''{actions}<p class="muted" style="margin:10px 0;">{hint}</p>'''
 
     if row and row['content']:
         rendered = _render_markdown(row['content'])
     else:
-        rendered = f'<p class="muted" style="margin:10px 0;">{_DOCUMENT_HINT}</p>'
+        hint = _empty_hint('Артефакт не заполнен.', 'добавить содержимое (поддерживается Markdown)')
+        rendered = f'<p class="muted" style="margin:10px 0;">{hint}</p>'
         meta = ''
     return f'''{actions}{meta}<div class="markdown-body">{rendered}</div>'''
 
@@ -274,3 +385,47 @@ def artifact_clear(key):
     db.close()
     flash('Артефакт очищен', 'success')
     return redirect(url_for('artifact_view', key=key))
+
+
+# ==================== ПОЛЬЗОВАТЕЛЬСКИЕ ИСТОРИИ ====================
+
+@app.route('/artifacts/user_stories/create', methods=['POST'])
+def user_story_create():
+    db = get_db()
+    project = current_project_row(db)
+    if not project:
+        db.close()
+        flash('Сначала выберите проект', 'error')
+        return redirect(url_for('artifact_view', key='user_stories'))
+    num = db.execute("""SELECT COALESCE(MAX(CAST(SUBSTR(identifier, 4) AS INTEGER)), 0) + 1
+                        FROM user_story WHERE project_id=?""", (project['id'],)).fetchone()[0]
+    db.execute("INSERT INTO user_story (project_id, identifier, section, role, want, benefit) VALUES (?, ?, ?, ?, ?, ?)",
+               (project['id'], f'US-{num}', (request.form.get('section') or '').strip(),
+                request.form.get('role'), request.form.get('want'), request.form.get('benefit')))
+    db.commit()
+    db.close()
+    flash('История добавлена', 'success')
+    return redirect(url_for('artifact_view', key='user_stories'))
+
+
+@app.route('/artifacts/user_stories/edit/<int:id>', methods=['POST'])
+def user_story_edit(id):
+    db = get_db()
+    db.execute("""UPDATE user_story SET section=?, role=?, want=?, benefit=?, updated_at=CURRENT_TIMESTAMP
+                  WHERE id=? AND is_deleted=0""",
+               ((request.form.get('section') or '').strip(), request.form.get('role'),
+                request.form.get('want'), request.form.get('benefit'), id))
+    db.commit()
+    db.close()
+    flash('История обновлена', 'success')
+    return redirect(url_for('artifact_view', key='user_stories'))
+
+
+@app.route('/artifacts/user_stories/delete/<int:id>')
+def user_story_delete(id):
+    db = get_db()
+    db.execute("UPDATE user_story SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.commit()
+    db.close()
+    flash('История удалена', 'success')
+    return redirect(url_for('artifact_view', key='user_stories'))
