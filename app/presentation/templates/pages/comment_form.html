@@ -1,0 +1,38 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card" style="max-width: 640px;">
+    <h2>Новый комментарий</h2>
+    <div class="comment" style="margin-bottom:12px;">
+        <strong>{{ entity_title }}</strong><br>{{ entity_label }}
+    </div>
+    <form method="POST" action="{{ action }}">
+        {% if origin %}<input type="hidden" name="origin" value="{{ origin }}">{% endif %}
+        {% if fixed %}
+        <input type="hidden" name="entity_type" value="{{ entity_type }}">
+        <input type="hidden" name="entity_id" value="{{ entity_id }}">
+        {% else %}
+        <div class="form-group">
+            <label>Тип</label>
+            <select name="entity_type" required>
+                <option value="task"{% if entity_type == 'task' %} selected{% endif %}>Задача</option>
+                <option value="subtask"{% if entity_type == 'subtask' %} selected{% endif %}>Подзадача</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>ID задачи/подзадачи</label>
+            <input type="number" name="entity_id" value="{{ entity_id or '' }}" required>
+        </div>
+        {% endif %}
+        <div class="form-group">
+            <label>Автор</label>
+            <div class="muted">{{ author }}</div>
+        </div>
+        <div class="form-group">
+            <label>Комментарий</label>
+            <textarea name="text" required></textarea>
+        </div>
+        <button type="submit" class="btn btn-success">Добавить</button>
+        <a href="{{ cancel_url }}" class="btn btn-primary">Отмена</a>
+    </form>
+</div>
+{% endblock %}

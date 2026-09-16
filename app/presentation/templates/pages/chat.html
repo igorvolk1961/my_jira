@@ -1,0 +1,25 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+    <h2>Чат</h2>
+    {% for m in messages %}
+    <div class="comment" style="margin-bottom:10px;">
+        <strong>{{ m.author }}</strong>
+        <span class="muted">· {{ m.created_at }}</span><br>
+        {{ m.text }}
+    </div>
+    {% else %}
+    <div class="muted">Сообщений пока нет</div>
+    {% endfor %}
+    {% if current_user %}
+    <form method="POST" action="{{ url_for('chat_post') }}" style="margin-top:14px;">
+        <div class="form-group">
+            <textarea name="text" required placeholder="Ваше сообщение"></textarea>
+        </div>
+        <button type="submit" class="btn btn-success">Отправить</button>
+    </form>
+    {% else %}
+    <div class="muted" style="margin-top:14px;">Чтобы писать в чат, <a href="{{ url_for('login') }}">войдите</a>.</div>
+    {% endif %}
+</div>
+{% endblock %}

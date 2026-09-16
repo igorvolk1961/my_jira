@@ -1,0 +1,55 @@
+{% macro table(t) %}
+<div class="card">
+    <h2>{{ t.title }}</h2>
+    <table>
+        <thead><tr>{% for h in t.headers %}<th>{{ h }}</th>{% endfor %}</tr></thead>
+        <tbody>
+        {% for row in t.rows %}
+            <tr>{% for cell in row %}<td>{{ cell|safe }}</td>{% endfor %}</tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endmacro %}
+
+{% macro tables(items) %}
+{% for t in items %}{{ table(t) }}{% endfor %}
+{% endmacro %}
+
+{% macro stats(cards) %}
+<div class="stats">
+    {% for label, value, color in cards %}
+    <div class="stat-card">
+        <h3>{{ label }}</h3>
+        <div class="value" style="color:{{ color }}">{{ value }}</div>
+    </div>
+    {% endfor %}
+</div>
+{% endmacro %}
+
+{% macro report(cards, tables) %}
+{{ stats(cards) }}
+{{ tables(tables) }}
+{% endmacro %}
+
+{% macro detail(title, info, tables_list=None, actions=None) %}
+<div class="card">
+    <h2>{{ title }}</h2>
+    {% for key, value in info %}
+    <p style="margin:6px 0;"><strong>{{ key }}:</strong> {{ value|safe }}</p>
+    {% endfor %}
+    {% if actions %}<div style="margin-top:14px;">{{ actions|safe }}</div>{% endif %}
+    <p style="margin-top:14px;"><a href="#" onclick="window.history.back(); return false;" class="btn btn-primary">Назад</a></p>
+</div>
+{{ tables(tables_list or []) }}
+{% endmacro %}
+
+{% macro status_form(endpoint, entity_id, statuses, selected_id, back=None, label='Сменить статус') %}
+<form method="POST" action="{{ url_for(endpoint, id=entity_id) }}" style="display:inline-flex; gap:6px; align-items:center; margin:5px;">
+    <select name="status_id">
+        {% for s in statuses %}<option value="{{ s.id }}" {% if s.id == selected_id %}selected{% endif %}>{{ s.name }}</option>{% endfor %}
+    </select>
+    {% if back %}<input type="hidden" name="next" value="{{ back }}">{% endif %}
+    <button type="submit" class="btn btn-success" style="margin:0;">{{ label }}</button>
+</form>
+{% endmacro %}

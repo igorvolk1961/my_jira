@@ -1,0 +1,11 @@
+{% extends 'base.html' %}
+{% import 'macros.html' as m %}
+{% block content %}
+<div class="card">
+    <h2>{{ title }}</h2>
+    {% for key, value in info %}<p style="margin:6px 0;"><strong>{{ key }}:</strong> {{ value|safe }}</p>{% endfor %}
+    {% if actions %}<div style="margin-top:14px;">{{ actions|safe }}</div>{% endif %}
+    <p style="margin-top:14px;"><a href="#" onclick="window.history.back(); return false;" class="btn btn-primary">Назад</a></p>
+</div>
+{% for t in tables %}{{ m.table(t) }}{% endfor %}
+{% endblock %}

@@ -13,10 +13,12 @@
 ## Технологии
 
 - **Python 3.12+**
-- **Flask 3.1.3** — веб-фреймворк
-- **Gunicorn** — WSGI-сервер для продакшена
-- **SQLite** — хранение данных (файл в `data/upo_database.db`, драйвер — стандартная библиотека Python)
+- **FastAPI** — веб-фреймворк (серверный рендеринг Jinja2)
+- **Uvicorn** — ASGI-сервер для продакшена
+- **SQLAlchemy 2.0 + Alembic** — доступ к данным и миграции схемы
+- **SQLite** — хранение данных (файл в `data/upo_database.db`)
 - **uv** — управление зависимостями и виртуальным окружением
+- **ruff + mypy + pre-commit** — линтеры и проверки перед коммитом
 - **Docker** (опционально) — контейнеризация для развёртывания
 
 ## Установка и запуск (локально)
@@ -38,14 +40,15 @@ uv sync
 uv run python main.py
 ```
 
-При первом запуске автоматически создаётся база данных и заполняются справочники.
+При первом запуске автоматически создаётся база данных, применяются миграции Alembic
+и заполняются справочники.
 
 ## Запуск в продакшене
 
-Через gunicorn (инициализация БД происходит при импорте модуля):
+Через uvicorn (инициализация БД происходит при импорте приложения):
 
 ```bash
-UPO_SECRET_KEY="<случайный ключ>" .venv/bin/gunicorn -w 1 -b 0.0.0.0:5000 main:app
+UPO_SECRET_KEY="<случайный ключ>" .venv/bin/uvicorn app.main:app --workers 1 --host 0.0.0.0 --port 5000
 ```
 
 Или через Docker:
@@ -55,7 +58,7 @@ docker compose up -d --build
 # доступ: http://<IP-адрес>:5000
 ```
 
-> Примечание: SQLite — файловая БД, поэтому рекомендуется один воркер gunicorn (`-w 1`). Данные и бэкапы хранятся в `data/` (в Docker — смонтированы в volume `./data:/app/data`).
+> Примечание: SQLite — файловая БД, поэтому рекомендуется один воркер uvicorn (`--workers 1`). Данные и бэкапы хранятся в `data/` (в Docker — смонтированы в volume `./data:/app/data`).
 
 ## Возможности
 
@@ -90,64 +93,75 @@ docker compose up -d --build
 
 **Пользователь по умолчанию:** логин `admin`, пароль `12345` (роль «администратор»).
 
-> Пароли хранятся в открытом виде — это учебный проект, не используйте его как есть в продакшене.
+> Пароли хранятся в виде хешей (PBKDF2-HMAC-SHA256). Старые записи с паролем в открытом
+> виде автоматически перехешируются при первом успешном входе.
+
+## Архитектура
+
+Строгое разделение слоёв (`app/`):
+
+```
+app/
+├── main.py              # create_app(): FastAPI, middleware, static, роутеры
+├── config.py            # пути, окружение, секрет
+├── dependencies.py      # get_db, current_user, require_admin/user/analyst
+├── security.py          # хеширование паролей, safe_next
+├── audit.py             # аудит действий (глобальная зависимость)
+├── urls.py              # Flask-совместимый url_for (относительный + query)
+├── db/                  # модели SQLAlchemy, engine, seed, Alembic-миграции
+├── repositories/        # только SQL/ORM
+├── services/            # бизнес-логика
+├── api/                 # контроллеры (HTTP): auth, projects, tasks, interviews, …
+└── presentation/        # Jinja2-шаблоны, макросы и построение HTML
+```
+
+Направление зависимостей: `api → services → repositories`; HTML формируется только в
+`presentation`. Слои проверяются тестом `tests/unit/test_layering.py`.
 
 ## Структура проекта
 
 ```
 my_jira/
-├── main.py               # точка входа: инициализация БД и запуск; подключает маршруты
-├── app_core.py           # ядро: Flask app, БД (init_db/get_db), базовый шаблон, общие хелперы
-├── routes_main.py        # главная страница
-├── routes_reference.py   # справочники (CRUD)
-├── routes_stakeholders.py
-├── routes_projects.py
-├── routes_requirements.py
-├── routes_employees.py
-├── routes_stages.py
-├── routes_tasks.py       # задачи и подзадачи
-├── routes_assignments.py
-├── routes_events.py
-├── routes_reports.py
-├── routes_details.py     # детальные страницы сущностей
-├── routes_interviews.py  # интервью, аудио, транскрипт
-├── routes_comments.py
-├── routes_database.py    # управление БД
-├── routes_auth.py        # вход, выход, регистрация
-├── routes_chat.py        # общий чат
-├── routes_audit.py       # журнал аудита
-├── routes_settings.py    # настройки
-├── routes_personal.py    # «Мои задачи», «Задачи»
-├── transcribe.py         # локальная транскрибация интервью (опционально; CPU)
-├── dev.py                # smoke-тесты на отдельной тестовой БД
-├── tests/                # pytest-тесты (conftest.py, endpoints_baseline.txt, test_*.py)
-├── pyproject.toml        # конфигурация проекта и зависимостей
+├── main.py               # точка входа (FastAPI) для uvicorn и dev-запуска
+├── app/                  # приложение, разделённое по слоям (см. «Архитектура»)
+├── alembic.ini           # конфигурация миграций
+├── dev.py                # smoke-сценарий на отдельной тестовой БД
+├── tests/                # pytest-тесты (conftest.py, endpoints_baseline.txt, test_*.py, unit/)
+├── pyproject.toml        # зависимости и настройки ruff/mypy/pytest
 ├── uv.lock               # lock-файл зависимостей
-├── .python-version       # версия Python (3.12)
+├── .pre-commit-config.yaml
 ├── Dockerfile            # сборка Docker-образа
 ├── docker-compose.yml    # запуск в Docker (с volume для data/)
-├── .dockerignore
 ├── data/
 │   ├── upo_database.db       # рабочая база данных
 │   ├── audio/                # аудиозаписи интервью
 │   └── backups/              # резервные копии БД
 ├── docs/                     # артефакты системного аналитика
-│   ├── README.md             # индекс артефактов
-│   ├── 01-vision.md … 14-risks.md
 └── references/
     └── task.md               # описание назначения и требований
 ```
 
-## Тестирование
+## Тестирование и проверки
 
-Два набора проверок, оба работают на **отдельной** тестовой БД и никогда не трогают рабочую `data/upo_database.db`:
+Все проверки работают на **отдельной** тестовой БД и никогда не трогают рабочую
+`data/upo_database.db`:
 
 ```bash
-uv run python dev.py     # smoke-проверки основных сценариев
-uv run pytest            # pytest-набор (в т.ч. инвариант маршрутов, бизнес-правила)
+uv run pytest            # pytest-набор (маршруты, бизнес-правила, слои, схема)
+uv run python dev.py     # smoke-сценарий основных операций
+
+# Линтеры и типы
+uv run ruff check .
+uv run ruff format --check .
+uv run mypy app
+
+# Всё сразу перед коммитом
+uv run pre-commit install
+uv run pre-commit run --all-files
 ```
 
-`tests/endpoints_baseline.txt` фиксирует набор маршрутов (`rule`, `endpoint`) — тест ловит любое изменение URL/имён endpoint, от которых зависит `url_for`.
+`tests/endpoints_baseline.txt` фиксирует набор маршрутов (`path`, `endpoint`) — тест ловит
+любое изменение URL/имён endpoint, от которых зависит `url_for`.
 
 ## Транскрибация интервью (опционально)
 

@@ -1,0 +1,32 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card" style="padding:14px 20px;">
+    {% include 'partials/project_selector.html' %}
+</div>
+<div class="stats">
+    <div class="stat-card">
+        <h3>Всего проектов</h3>
+        <div class="value">{{ stats.projects }}</div>
+    </div>
+    <div class="stat-card">
+        <h3>Активных задач</h3>
+        <div class="value">{{ stats.active_tasks }}</div>
+    </div>
+    <div class="stat-card">
+        <h3>Просроченных задач</h3>
+        <div class="value" style="color: {{ '#e74c3c' if stats.overdue_tasks > 0 else '#27ae60' }}">{{ stats.overdue_tasks }}</div>
+    </div>
+    <div class="stat-card">
+        <h3>Сотрудников</h3>
+        <div class="value">{{ stats.employees }}</div>
+    </div>
+    <div class="stat-card">
+        <h3>Событий</h3>
+        <div class="value">{{ stats.events }}</div>
+    </div>
+</div>
+<div class="card">
+    <h2>Добро пожаловать в Учебный проектный офис!</h2>
+    <p style="margin-top: 10px;">Используйте меню выше для управления проектами, задачами и персоналом.</p>
+</div>
+{% endblock %}

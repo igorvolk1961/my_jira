@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% import 'macros.html' as m %}
+{% block content %}
+{% if add_url %}<a href="{{ add_url }}" class="btn btn-success">{{ add_label or '+ Добавить' }}</a>{% endif %}
+{% if pre_html %}{{ pre_html|safe }}{% endif %}
+{{ m.table(table) }}
+{% if post_html %}{{ post_html|safe }}{% endif %}
+{% endblock %}

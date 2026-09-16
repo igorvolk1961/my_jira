@@ -9,9 +9,10 @@ services:
     ports:
       - "5000:5000"
     environment:
-      # Секретный ключ подписи сессии. Задайте свой через .env или окружение:
+      # Секретный ключ подписи сессии. Обязателен: задайте свой через .env или окружение:
       #   UPO_SECRET_KEY=<случайная строка> docker compose up -d
-      UPO_SECRET_KEY: "${UPO_SECRET_KEY:-change-me-in-prod}"
+      # Без него запуск завершится ошибкой, чтобы не работать со слабым/известным ключом.
+      UPO_SECRET_KEY: "${UPO_SECRET_KEY:?UPO_SECRET_KEY is required}"
     volumes:
       # Данные (SQLite-БД + бэкапы) храним на хосте, чтобы не терять при пересоздании
       - ./data:/app/data

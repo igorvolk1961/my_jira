@@ -1,0 +1,46 @@
+{% extends 'base.html' %}
+{% block head %}{{ head_html|safe }}{% endblock %}
+{% block content %}
+<div class="card">
+    <h2>{{ artifact_title }}</h2>
+    <p class="muted" style="margin:6px 0 12px;">Проект: {{ project.name }}</p>
+    {% if is_bpmn %}
+    <form method="POST" id="bpmn-form">
+        <input type="hidden" name="content" id="bpmn-xml">
+        <button type="submit" class="btn btn-success">Сохранить</button>
+        <a href="{{ back_url }}" class="btn btn-primary">Отмена</a>
+    </form>
+    <div id="bpmn-canvas" style="height:600px; margin-top:12px; background:#fff; border:1px solid #ddd;"></div>
+    <script src="{{ modeler_url }}"></script>
+    <script>
+    (function() {
+        var initialXml = {{ initial_xml|tojson }};
+        var modeler = new BpmnJS({ container: '#bpmn-canvas' });
+        var loading = initialXml ? modeler.importXML(initialXml) : modeler.createDiagram();
+        loading.catch(function(err) {
+            document.getElementById('bpmn-canvas').innerHTML =
+                '<p class="muted" style="padding:10px;">Не удалось загрузить диаграмму.</p>';
+        });
+        document.getElementById('bpmn-form').addEventListener('submit', function(ev) {
+            ev.preventDefault();
+            modeler.saveXML({ format: true }).then(function(result) {
+                document.getElementById('bpmn-xml').value = result.xml;
+                ev.target.submit();
+            }).catch(function() {
+                alert('Не удалось сохранить диаграмму.');
+            });
+        });
+    })();
+    </script>
+    {% else %}
+    <form method="POST">
+        <div class="form-group">
+            <label>Содержимое (Markdown)</label>
+            <textarea name="content" style="min-height: 320px; font-family: monospace;">{{ current_text }}</textarea>
+        </div>
+        <button type="submit" class="btn btn-success">Сохранить</button>
+        <a href="{{ back_url }}" class="btn btn-primary">Отмена</a>
+    </form>
+    {% endif %}
+</div>
+{% endblock %}

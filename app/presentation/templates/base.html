@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ title }} - УПО</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: Arial, sans-serif; background: #f5f5f5; }
+        .container { max-width: 1400px; margin: 0 auto; padding: 20px; }
+        .header { background: #2c3e50; color: white; padding: 20px; margin-bottom: 20px; }
+        .header h1 { font-size: 24px; }
+        .nav { background: #34495e; padding: 10px; margin-bottom: 20px; display: flex; flex-wrap: wrap; align-items: center; }
+        .nav a { color: white; text-decoration: none; padding: 8px 15px; margin-right: 10px; display: inline-block; }
+        .nav-right { margin-left: auto; display: flex; align-items: center; gap: 6px; color: #bdc3c7; font-size: 13px; }
+        .nav-right a { margin-right: 0; }
+        .nav-right a.login-btn { background: #27ae60; border-radius: 4px; }
+        .nav-right a.logout-btn { background: #e74c3c; border-radius: 4px; }
+        .nav a:hover { background: #4a6278; border-radius: 4px; }
+        .nav .dropdown { position: relative; display: inline-block; }
+        .nav .dropbtn { color: white; text-decoration: none; padding: 8px 15px; margin-right: 10px; display: inline-block; cursor: pointer; }
+        .nav .dropdown:hover .dropbtn { background: #4a6278; border-radius: 4px; }
+        .nav .dropdown-content { display: none; position: absolute; top: 100%; left: 0; background: #34495e; min-width: 210px; box-shadow: 0 8px 16px rgba(0,0,0,0.25); z-index: 1000; border-radius: 4px; }
+        .nav .dropdown:hover .dropdown-content { display: block; }
+        .nav .dropdown-content a { display: block; padding: 10px 15px; margin-right: 0; border-radius: 0; }
+        .nav .dropdown-content a:hover { background: #4a6278; }
+        .card { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); overflow-x: auto; }
+        .btn { padding: 8px 16px; border: none; border-radius: 4px; cursor: pointer; text-decoration: none; display: inline-block; margin: 5px; }
+        .btn-primary { background: #3498db; color: white; }
+        .btn-success { background: #27ae60; color: white; }
+        .btn-danger { background: #e74c3c; color: white; }
+        .btn-warning { background: #f39c12; color: white; }
+        .btn:hover { opacity: 0.9; }
+        table { width: 100%; border-collapse: collapse; margin-top: 15px; }
+        th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+        th { background: #ecf0f1; font-weight: bold; }
+        tr:hover { background: #f8f9fa; }
+        .form-group { margin-bottom: 15px; }
+        .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .form-group input, .form-group select, .form-group textarea {
+            width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px;
+        }
+        .form-group textarea { min-height: 100px; }
+        .flash { padding: 10px; margin: 10px 0; border-radius: 4px; }
+        .flash-success { background: #d4edda; color: #155724; }
+        .flash-error { background: #f8d7da; color: #721c24; }
+        .flash-warning { background: #fff3cd; color: #856404; }
+        .badge { padding: 4px 8px; border-radius: 12px; font-size: 12px; color: white; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
+        .stat-card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stat-card h3 { font-size: 14px; color: #7f8c8d; margin-bottom: 10px; }
+        .stat-card .value { font-size: 32px; font-weight: bold; color: #2c3e50; }
+        .tabs { border-bottom: 2px solid #34495e; margin-bottom: 15px; display: flex; gap: 5px; }
+        .tab-btn { background: none; border: none; padding: 10px 18px; font-size: 15px; cursor: pointer; border-bottom: 3px solid transparent; color: #7f8c8d; font-weight: bold; }
+        .tab-btn.active { border-bottom-color: #34495e; color: #2c3e50; }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .tree details { border: 1px solid #ddd; border-radius: 6px; margin-bottom: 8px; background: #fbfbfb; }
+        .tree summary { cursor: pointer; padding: 10px 14px; font-weight: bold; background: #ecf0f1; border-radius: 6px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+        .tree details > .node-body { padding: 8px 14px; }
+        .tree .node-meta { font-weight: normal; font-size: 13px; color: #7f8c8d; }
+        .tree .node-info { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .tree .node-actions { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; white-space: nowrap; font-weight: normal; }
+        .assign { font-size: 13px; color: #34495e; margin-top: 6px; }
+        .comments { margin: 8px 0; padding: 8px 10px; background: #f4f6f7; border-left: 3px solid #3498db; }
+        .comments .comment-note { font-size: 12px; color: #7f8c8d; margin-bottom: 4px; }
+        .comments .comment { font-size: 13px; margin-bottom: 6px; }
+        .muted { color: #95a5a6; }
+        .name-cell { white-space: nowrap; min-width: 200px; }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <div class="header">
+        <h1>{{ title }}</h1>
+        <div style="margin-top:8px; font-size:13px; color:#bdc3c7;">Активная БД: <strong style="color:#ecf0f1;">{{ current_db }}</strong> &nbsp;|&nbsp; <a href="{{ url_for('database_index') }}" style="color:#ecf0f1;">управление БД</a>{% if current_project %} &nbsp;|&nbsp; Текущий проект: <a href="{{ url_for('project_detail', id=current_project.id) }}" style="color:#ecf0f1;">{{ current_project.name }}</a>{% endif %}</div>
+    </div>
+    <div class="nav">
+        <a href="{{ url_for('index') }}">Главная</a>
+        <div class="dropdown">
+            <span class="dropbtn">Артефакты СА ▾</span>
+            <div class="dropdown-content">
+                <a href="{{ url_for('artifact_view', key='vision') }}">Видение (Vision)</a>
+                <a href="{{ url_for('artifact_view', key='glossary') }}">Глоссарий</a>
+                <a href="{{ url_for('artifact_view', key='stakeholders') }}">Заинтересованные лица</a>
+                <a href="{{ url_for('artifact_view', key='personas') }}">Персоны</a>
+                <a href="{{ url_for('artifact_view', key='user_stories') }}">Пользовательские истории</a>
+                <a href="{{ url_for('artifact_view', key='use_cases') }}">Варианты использования</a>
+                <a href="{{ url_for('artifact_view', key='functional_requirements') }}">Функциональные требования</a>
+                <a href="{{ url_for('artifact_view', key='nonfunctional_requirements') }}">Нефункциональные требования</a>
+                <a href="{{ url_for('artifact_view', key='bpmn') }}">Модель бизнес-процессов (BPMN)</a>
+                <a href="{{ url_for('artifact_view', key='state_machines') }}">Диаграммы состояний</a>
+                <a href="{{ url_for('artifact_view', key='data_model') }}">Модель данных (ER)</a>
+                <a href="{{ url_for('artifact_view', key='prototype') }}">Прототип и навигация</a>
+                <a href="{{ url_for('artifact_view', key='backlog') }}">Бэклог и критерии приёмки</a>
+                <a href="{{ url_for('artifact_view', key='risks') }}">Риски и допущения</a>
+            </div>
+        </div>
+        <div class="dropdown">
+            <span class="dropbtn">Справочники ▾</span>
+            <div class="dropdown-content">
+                <a href="{{ url_for('priorities_list') }}">Приоритеты</a>
+                <a href="{{ url_for('stakeholder_types_list') }}">Типы стейкхолдеров</a>
+                <a href="{{ url_for('requirement_types_list') }}">Типы требований</a>
+                <a href="{{ url_for('nonfunctional_requirement_types_list') }}">Типы нефункциональных требований</a>
+                <a href="{{ url_for('position_types_list') }}">Типы должностей</a>
+                <a href="{{ url_for('employee_statuses_list') }}">Статусы сотрудников</a>
+                <a href="{{ url_for('stage_types_list') }}">Типы этапов</a>
+                <a href="{{ url_for('stage_statuses_list') }}">Статусы этапов</a>
+                <a href="{{ url_for('task_statuses_list') }}">Статусы задач</a>
+                <a href="{{ url_for('task_types_list') }}">Типы задач</a>
+            </div>
+        </div>
+        <a href="{{ url_for('stakeholders_list') }}">Стейкхолдеры</a>
+        <a href="{{ url_for('employees_list') }}">Сотрудники</a>
+        <a href="{{ url_for('projects_list') }}">Проекты</a>
+        <a href="{{ url_for('events_list') }}">События</a>
+        <a href="{{ url_for('database_index') }}">База данных</a>
+        <div class="dropdown">
+            <span class="dropbtn">Отчёты ▾</span>
+            <div class="dropdown-content">
+                <a href="{{ url_for('report_projects') }}">Проекты: сводка и прогресс</a>
+                <a href="{{ url_for('report_stakeholders') }}">Стейкхолдеры: типы</a>
+                <a href="{{ url_for('report_employees') }}">Сотрудники: загрузка и состав</a>
+                <a href="{{ url_for('report_requirements') }}">Требования: анализ</a>
+                <a href="{{ url_for('report_stages') }}">Этапы: статусы</a>
+                <a href="{{ url_for('report_tasks') }}">Задачи: статусы и просрочка</a>
+                <a href="{{ url_for('report_subtasks') }}">Подзадачи: статусы</a>
+                <a href="{{ url_for('report_assignments') }}">Назначения: загрузка</a>
+                <a href="{{ url_for('report_events') }}">События: динамика</a>
+            </div>
+        </div>
+        {% if is_admin %}
+        <a href="{{ url_for('admin_tasks') }}">Задачи</a>
+        <a href="{{ url_for('audit_index') }}">Аудит</a>
+        <a href="{{ url_for('settings_index') }}">Настройки</a>
+        {% elif current_user %}
+        <a href="{{ url_for('my_tasks') }}">Мои задачи</a>
+        {% endif %}
+        <a href="{{ url_for('chat_index') }}">Чат</a>
+        <div class="nav-right">
+            {% if current_user %}
+                <span>{% if current_user.position_name %}{{ current_user.position_name }} {% endif %}{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }}{% if is_analyst %}, системный аналитик{% endif %})</span>
+                <a class="logout-btn" href="{{ url_for('logout') }}">Выход</a>
+            {% else %}
+                <a class="login-btn" href="{{ url_for('login') }}">Вход</a>
+            {% endif %}
+        </div>
+    </div>
+    <div class="container">
+        {% for category, message in flashes %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+        {% endfor %}
+        {% block content %}{% endblock %}
+    </div>
+</body>
+</html>

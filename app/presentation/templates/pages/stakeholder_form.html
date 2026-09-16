@@ -1,0 +1,66 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card" style="max-width: 640px;">
+    <h2>{{ title }}</h2>
+    <form method="POST" action="{{ action }}">
+        {% if project_id %}<input type="hidden" name="project_id" value="{{ project_id }}">{% endif %}
+        {% if origin %}<input type="hidden" name="origin" value="{{ origin }}">{% endif %}
+        <div class="form-group">
+            <label>Фамилия</label>
+            <input type="text" name="last_name" value="{{ stakeholder['last_name'] if stakeholder else '' }}" required>
+        </div>
+        <div class="form-group">
+            <label>Имя</label>
+            <input type="text" name="first_name" value="{{ stakeholder['first_name'] if stakeholder else '' }}" required>
+        </div>
+        <div class="form-group">
+            <label>Отчество</label>
+            <input type="text" name="middle_name" value="{{ (stakeholder['middle_name'] or '') if stakeholder else '' }}">
+        </div>
+        <div class="form-group">
+            <label>Тип стейкхолдера</label>
+            <select name="type_id" required onchange="setPrio(this.value); toggleEmp()">
+                {% for t in types %}
+                <option value="{{ t['id'] }}"{% if stakeholder and t['id'] == stakeholder['type_id'] %} selected{% endif %}>{{ t['name'] }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group" id="employee_select" style="display:none;">
+            <label>Сотрудник</label>
+            <select name="employee_id">
+                <option value="">— не выбран —</option>
+                {% for e in employees %}
+                <option value="{{ e['id'] }}"{% if stakeholder and e['id'] == stakeholder['employee_id'] %} selected{% endif %}>{{ e['last_name'] }} {{ e['first_name'] }} {{ e['middle_name'] or '' }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="form-group">
+            <label>Должность</label>
+            <input type="text" name="position" value="{{ (stakeholder['position'] or '') if stakeholder else '' }}">
+        </div>
+        <div class="form-group">
+            <label>Приоритет</label>
+            <select name="priority" required>
+                {% for p in priorities %}
+                <option value="{{ p['weight'] }}"{% if (stakeholder and p['weight'] == stakeholder['priority']) or (not stakeholder and p['weight'] == 3) %} selected{% endif %}>{{ p['name'] }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <button type="submit" class="btn btn-success">{{ submit_label }}</button>
+        <a href="{{ cancel_url }}" class="btn btn-primary">Отмена</a>
+    </form>
+</div>
+<script>
+var prioByType = { {{ type_prio|safe }} };
+var devType = {{ dev_id }};
+function setPrio(tid) {
+    var p = prioByType[tid];
+    if (p) { document.querySelector('select[name=priority]').value = p; }
+}
+function toggleEmp() {
+    var v = document.querySelector('select[name=type_id]').value;
+    document.getElementById('employee_select').style.display = (v == devType) ? 'block' : 'none';
+}
+toggleEmp();
+</script>
+{% endblock %}

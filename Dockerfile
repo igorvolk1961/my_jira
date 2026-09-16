@@ -5,11 +5,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY pyproject.toml ./
-COPY *.py ./
+COPY pyproject.toml alembic.ini ./
+COPY app ./app
 COPY static ./static
 
-RUN pip install --no-cache-dir flask==3.1.3 gunicorn>=21.2.0 markdown-it-py>=4.2.0
+RUN pip install --no-cache-dir "fastapi>=0.115" "uvicorn[standard]>=0.30" "sqlalchemy>=2.0" "alembic>=1.13" "jinja2>=3.1" "python-multipart>=0.0.9" "itsdangerous>=2.2" "markdown-it-py>=4.2.0"
 
 # Каталог для файлов SQLite-БД и резервных копий (монтируется как volume)
 RUN mkdir -p /app/data
@@ -17,4 +17,4 @@ RUN mkdir -p /app/data
 EXPOSE 5000
 
 # Один воркер: SQLite - файловая БД, несколько процессов дадут конфликты записи
-CMD ["gunicorn", "--workers", "1", "--bind", "0.0.0.0:5000", "--timeout", "60", "main:app"]
+CMD ["uvicorn", "app.main:app", "--workers", "1", "--host", "0.0.0.0", "--port", "5000", "--timeout-keep-alive", "60"]

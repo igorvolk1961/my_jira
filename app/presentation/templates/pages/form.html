@@ -1,0 +1,44 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card" style="max-width: 640px;">
+    <h2>{{ title }}</h2>
+    {% if error %}<div class="flash flash-error">{{ error }}</div>{% endif %}
+    <form method="POST" action="{{ action }}" enctype="{{ enctype or 'application/x-www-form-urlencoded' }}">
+        {% for field in fields %}
+        {% if field.type == 'hidden' %}
+        <input type="hidden" name="{{ field.name }}" value="{{ field.value if field.value is not none else '' }}">
+        {% elif field.type == 'checkbox' %}
+        <div class="form-group">
+            <label style="font-weight:normal;">
+                <input type="checkbox" name="{{ field.name }}" value="1" style="width:auto; display:inline; margin-right:6px;"{% if field.checked %} checked{% endif %}>
+                {{ field.label }}
+            </label>
+            {% if field.hint %}<div class="muted" style="margin-top:6px;">{{ field.hint }}</div>{% endif %}
+        </div>
+        {% elif field.type == 'textarea' %}
+        <div class="form-group">
+            <label>{{ field.label }}</label>
+            <textarea name="{{ field.name }}"{% if field.required %} required{% endif %}>{{ field.value if field.value is not none else '' }}</textarea>
+        </div>
+        {% elif field.type == 'select' %}
+        <div class="form-group">
+            <label>{{ field.label }}</label>
+            <select name="{{ field.name }}"{% if field.required %} required{% endif %}>
+                {% for opt in field.options %}
+                <option value="{{ opt.value if opt.value is not none else '' }}"{% if opt.selected %} selected{% endif %}>{{ opt.label }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        {% else %}
+        <div class="form-group">
+            <label>{{ field.label }}</label>
+            <input type="{{ field.type }}" name="{{ field.name }}" value="{{ field.value if field.value is not none else '' }}"{% if field.required %} required{% endif %}>
+        </div>
+        {% endif %}
+        {% endfor %}
+        <button type="submit" class="btn btn-success">{{ submit_label or 'Сохранить' }}</button>
+        {% if back_url %}<a href="{{ back_url }}" class="btn btn-primary">Отмена</a>{% endif %}
+        {% if alt_url %}<a href="{{ alt_url }}" class="btn btn-primary">{{ alt_label or 'Ещё' }}</a>{% endif %}
+    </form>
+</div>
+{% endblock %}

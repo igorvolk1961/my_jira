@@ -1,0 +1,26 @@
+{% extends 'base.html' %}
+{% block content %}
+<div class="card">
+    <h2>Редактирование транскрипта (интервью #{{ interview_id }})</h2>
+    <form method="POST" action="{{ action }}" onsubmit="return busy(this, 'Сохранение…');">
+        <table>
+            <thead><tr><th>Начало</th><th>Конец</th><th>Спикер</th><th>Текст</th></tr></thead>
+            <tbody>
+            {% for s in segments %}
+                <tr>
+                    <td>{{ s.start }}</td>
+                    <td>{{ s.end }}</td>
+                    <td><input type="text" name="speaker_{{ s.id }}" value="{{ s.speaker }}" placeholder="спикер" style="width:130px;"></td>
+                    <td><input type="text" name="text_{{ s.id }}" value="{{ s.text }}" style="width:100%;"></td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        <p style="margin-top:12px;">
+            <button type="submit" class="btn btn-success">Сохранить все</button>
+            <a href="{{ back_url }}" class="btn btn-primary">Отмена</a>
+        </p>
+    </form>
+    <script>function busy(f, l) { var b = f.querySelector('button[type="submit"]'); if (b) { b.disabled = true; b.textContent = l; } return true; }</script>
+</div>
+{% endblock %}

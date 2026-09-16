@@ -1,0 +1,10 @@
+{% if projects %}
+<label style="margin-right:6px;">Текущий проект:</label>
+<select name="project_id" onchange="location.href='{{ url_for('current_project_set', id=0) }}'.replace(/0$/, this.value)+'?next='+encodeURIComponent('{{ request.url.path }}');">
+    {% for p in projects %}
+    <option value="{{ p.id }}" {% if current_project and p.id == current_project.id %}selected{% endif %}>{{ p.name }}</option>
+    {% endfor %}
+</select>
+{% else %}
+<span class="muted">Проектов пока нет</span>
+{% endif %}

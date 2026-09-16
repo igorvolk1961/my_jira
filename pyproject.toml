@@ -3,17 +3,49 @@ name = "my-jira"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
-    "flask==3.1.3",
-    "gunicorn>=21.2.0",
     "markdown-it-py>=4.2.0",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "itsdangerous>=2.2",
 ]
 
 [project.optional-dependencies]
 transcription = ["faster-whisper>=1.0"]
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit>=3.8",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+# E501: в проекте есть длинные строковые литералы (вопросы интервью, HTML-фрагменты).
+# B008: FastAPI DI использует вызов Depends() в значениях по умолчанию.
+ignore = ["E501", "B008"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/db/migrations/versions/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+plugins = ["sqlalchemy.ext.mypy.plugin"]
+warn_unused_ignores = true
+check_untyped_defs = true
+exclude = ["app/db/migrations/versions/", "tests/"]
