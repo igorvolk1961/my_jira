@@ -109,27 +109,51 @@ def test_bpmn_artifact_edit_and_view(client):
 
 def test_user_stories_editor_and_markdown(client):
     client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    # иерархия разделов
+    client.post('/artifacts/user_stories/sections/create', data={'name': 'Требования'})
+    client.post('/artifacts/user_stories/sections/create', data={'name': 'Проекты'})
+    sec = _scalar("SELECT id FROM user_story_section WHERE name='Требования'")
+    client.post('/artifacts/user_stories/sections/create', data={'name': 'Подраздел', 'parent_id': str(sec)})
+    child = _scalar("SELECT id FROM user_story_section WHERE name='Подраздел'")
+    assert _scalar("SELECT parent_id FROM user_story_section WHERE id=?", (child,)) == sec
+    # добавление стейкхолдера на месте
+    client.post('/artifacts/user_stories/stakeholder/create',
+                data={'last_name': 'Петров', 'first_name': 'Пётр', 'type_id': '1', 'priority': '3'})
+    stk = _scalar("SELECT id FROM stakeholder WHERE last_name='Петров'")
+    assert stk
+    # история с явным идентификатором, разделом и стейкхолдером
     r = client.post('/artifacts/user_stories/create',
-                    data={'section': 'Требования', 'role': 'администратор', 'want': 'видеть отчёт',
-                          'benefit': 'контролировать сроки'})
+                    data={'identifier': 'US-42', 'section_id': str(sec), 'stakeholder_id': str(stk),
+                          'want': 'видеть отчёт', 'benefit': 'контролировать сроки'})
     assert r.status_code == 302
-    assert _scalar("SELECT identifier FROM user_story WHERE project_id=1") == 'US-1'
+    assert _scalar("SELECT identifier FROM user_story WHERE project_id=1") == 'US-42'
     body = client.get('/artifacts/user_stories').get_data(as_text=True)
-    assert 'US-1' in body and 'Показать Markdown' in body and 'видеть отчёт' in body
-    # группировка по разделам в таблице
-    assert 'us-section' in body and 'Требования' in body
-    # markdown-исходник сгруппирован по разделам и рендерится
-    assert '## Требования' in body and '- **US-1**: Как администратор' in body
-    # редактирование (в т.ч. смена раздела)
-    sid = _scalar("SELECT id FROM user_story WHERE project_id=1")
+    assert 'name="identifier"' in body and 'US-42' in body and 'Показать Markdown' in body
+    assert 'us-section' in body and 'Требования' in body and 'Петров' in body
+    # markdown с вложенными разделами
+    assert '## Требования' in body and '- **US-42**: Как Петров Пётр' in body
+    # автоидентификатор продолжает нумерацию
+    client.post('/artifacts/user_stories/create', data={'want': 'w', 'benefit': 'b'})
+    assert _scalar("SELECT identifier FROM user_story WHERE id=2") == 'US-43'
+    # правка: идентификатор и перенос в подраздел
+    sid = _scalar("SELECT id FROM user_story WHERE identifier='US-42'")
     client.post(f'/artifacts/user_stories/edit/{sid}',
-                data={'section': 'Отчёты', 'role': 'Р', 'want': 'W', 'benefit': 'B'})
-    assert _scalar("SELECT want FROM user_story WHERE id=?", (sid,)) == 'W'
-    assert _scalar("SELECT section FROM user_story WHERE id=?", (sid,)) == 'Отчёты'
-    # идентификаторы инкрементируются
-    client.post('/artifacts/user_stories/create', data={'role': 'r', 'want': 'w', 'benefit': 'b'})
-    assert _scalar("SELECT identifier FROM user_story WHERE project_id=1 AND id=2") == 'US-2'
-    # удаление
+                data={'identifier': 'US-1', 'section_id': str(child), 'want': 'W', 'benefit': 'B'})
+    assert _scalar("SELECT identifier FROM user_story WHERE id=?", (sid,)) == 'US-1'
+    assert _scalar("SELECT section_id FROM user_story WHERE id=?", (sid,)) == child
+    # запрет цикла в разделах
+    client.post(f'/artifacts/user_stories/sections/edit/{sec}',
+                data={'name': 'Требования', 'parent_id': str(child)})
+    assert _scalar("SELECT parent_id FROM user_story_section WHERE id=?", (sec,)) is None
+    # непустой раздел не удаляется
+    client.get(f'/artifacts/user_stories/sections/delete/{sec}')
+    assert _scalar("SELECT is_deleted FROM user_story_section WHERE id=?", (sec,)) == 0
+    # пустой — удаляется
+    client.post('/artifacts/user_stories/sections/create', data={'name': 'Пустой'})
+    empty = _scalar("SELECT id FROM user_story_section WHERE name='Пустой'")
+    client.get(f'/artifacts/user_stories/sections/delete/{empty}')
+    assert _scalar("SELECT is_deleted FROM user_story_section WHERE id=?", (empty,)) == 1
+    # удаление истории
     client.get(f'/artifacts/user_stories/delete/{sid}')
     assert _scalar("SELECT is_deleted FROM user_story WHERE id=?", (sid,)) == 1
 
