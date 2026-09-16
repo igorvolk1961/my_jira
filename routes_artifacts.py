@@ -85,7 +85,8 @@ def _artifact_body(db, artifact, project):
         type_id = type_row['id'] if type_row else None
         body, _count = _project_requirements_html(
             db, project['id'], type_id=type_id,
-            next_url=url_for('artifact_view', key=artifact['key']), preset_type_id=type_id)
+            next_url=url_for('artifact_view', key=artifact['key']), preset_type_id=type_id,
+            show_nfr_type=(artifact['key'] == 'nonfunctional_requirements'))
         return body
 
     row = db.execute("SELECT * FROM project_artifact WHERE project_id=? AND artifact_key=? AND is_deleted=0",

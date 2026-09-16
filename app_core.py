@@ -113,6 +113,20 @@ def backup_db(path=None):
     except Exception:
         pass
 
+# Предзаполняемые типы нефункциональных требований
+NONFUNCTIONAL_REQUIREMENT_TYPES = [
+    'Производительность',
+    'Масштабируемость',
+    'Доступность',
+    'Надёжность',
+    'Безопасность',
+    'Удобство использования',
+    'Совместимость',
+    'Сопровождаемость',
+    'Ограничения и соответствие',
+]
+
+
 def init_db(path=None):
     """Создание таблиц и начальное заполнение справочников"""
     backup_db(path)
@@ -160,6 +174,15 @@ def init_db(path=None):
         
         -- Типы требований
         CREATE TABLE IF NOT EXISTS requirement_type (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0
+        );
+
+        -- Типы нефункциональных требований
+        CREATE TABLE IF NOT EXISTS nonfunctional_requirement_type (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL UNIQUE,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -529,6 +552,13 @@ def init_db(path=None):
     if 'is_analyst' not in pcols:
         db.execute("ALTER TABLE position_type ADD COLUMN is_analyst INTEGER NOT NULL DEFAULT 0")
         db.execute("UPDATE position_type SET is_analyst=1 WHERE lower(name)=lower('Системный аналитик')")
+    rcols = [r[1] for r in db.execute("PRAGMA table_info(requirement)").fetchall()]
+    if 'nfr_type_id' not in rcols:
+        db.execute("ALTER TABLE requirement ADD COLUMN nfr_type_id INTEGER REFERENCES nonfunctional_requirement_type(id)")
+
+    # Типы нефункциональных требований: предзаполнение (для новых и существующих БД)
+    for nfr in NONFUNCTIONAL_REQUIREMENT_TYPES:
+        db.execute("INSERT OR IGNORE INTO nonfunctional_requirement_type (name) VALUES (?)", (nfr,))
 
     # Типы задач: отдельное наполнение (для существующих БД, где основные справочники уже есть)
     for ttype in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
@@ -832,6 +862,8 @@ ADMIN_WRITE_ENDPOINTS = {
     'priority_create', 'priority_edit', 'priority_delete',
     'stakeholder_type_create', 'stakeholder_type_edit', 'stakeholder_type_delete',
     'requirement_type_create', 'requirement_type_edit', 'requirement_type_delete',
+    'nonfunctional_requirement_type_create', 'nonfunctional_requirement_type_edit',
+    'nonfunctional_requirement_type_delete',
     'position_type_create', 'position_type_edit', 'position_type_delete',
     'employee_status_create', 'employee_status_edit', 'employee_status_delete',
     'stage_type_create', 'stage_type_edit', 'stage_type_delete',
@@ -890,7 +922,8 @@ GET_MUTATION_ENDPOINTS = {
     'artifact_clear',
     'project_stage_delete', 'event_delete', 'interview_delete', 'interview_qa_delete',
     'employee_status_delete', 'position_type_delete', 'priority_delete',
-    'stakeholder_type_delete', 'requirement_type_delete', 'stage_type_delete',
+    'stakeholder_type_delete', 'requirement_type_delete',
+    'nonfunctional_requirement_type_delete', 'stage_type_delete',
     'stage_status_delete', 'task_status_delete', 'task_type_delete',
 }
 
@@ -1517,6 +1550,7 @@ BASE_TEMPLATE = '''
                 <a href="{{ url_for('priorities_list') }}">Приоритеты</a>
                 <a href="{{ url_for('stakeholder_types_list') }}">Типы стейкхолдеров</a>
                 <a href="{{ url_for('requirement_types_list') }}">Типы требований</a>
+                <a href="{{ url_for('nonfunctional_requirement_types_list') }}">Типы нефункциональных требований</a>
                 <a href="{{ url_for('position_types_list') }}">Типы должностей</a>
                 <a href="{{ url_for('employee_statuses_list') }}">Статусы сотрудников</a>
                 <a href="{{ url_for('stage_types_list') }}">Типы этапов</a>
@@ -1641,7 +1675,8 @@ def _detail_page(title, info, tables=None, actions=None):
 
 # ==================== ОБЩИЕ БЛОКИ КАРТОЧКИ ПРОЕКТА / АРТЕФАКТОВ ====================
 
-def _project_requirements_html(db, project_id, type_id=None, next_url=None, preset_type_id=None):
+def _project_requirements_html(db, project_id, type_id=None, next_url=None, preset_type_id=None,
+                               show_nfr_type=False):
     """Таблица требований проекта (общая для вкладки проекта и артефактов №7/№8)."""
     params = [project_id]
     type_filter = ''
@@ -1649,11 +1684,13 @@ def _project_requirements_html(db, project_id, type_id=None, next_url=None, pres
         type_filter = ' AND rt.id=?'
         params.append(type_id)
     requirements = db.execute(f"""
-        SELECT r.*, s.last_name, s.first_name, rt.name as type_name, pr.name as priority_name
+        SELECT r.*, s.last_name, s.first_name, rt.name as type_name, pr.name as priority_name,
+               nrt.name as nfr_type_name
         FROM requirement r
         LEFT JOIN stakeholder s ON r.stakeholder_id = s.id
         JOIN requirement_type rt ON r.requirement_type_id = rt.id
         JOIN priority pr ON r.priority_id = pr.id
+        LEFT JOIN nonfunctional_requirement_type nrt ON r.nfr_type_id = nrt.id
         WHERE r.project_id=? AND r.is_deleted=0{type_filter}
         ORDER BY r.id DESC
     """, tuple(params)).fetchall()
@@ -1663,10 +1700,12 @@ def _project_requirements_html(db, project_id, type_id=None, next_url=None, pres
             kw['next'] = next_url
         return url_for(endpoint, **kw)
 
+    nfr_header = '<th>Тип НФТ</th>' if show_nfr_type else ''
     rows = ''.join([f'''
         <tr>
             <td>{r['id']}</td>
             <td>{r['type_name']}</td>
+            {f'<td>{r["nfr_type_name"] or "-"}</td>' if show_nfr_type else ''}
             <td>{f'<a href="{url_for("stakeholder_detail", id=r["stakeholder_id"])}">{r["last_name"] or ""} {r["first_name"] or ""}</a>' if r['stakeholder_id'] else '-'}</td>
             <td>{r['description'][:80]}</td>
             <td>{r['priority_name']}</td>
@@ -1688,7 +1727,7 @@ def _project_requirements_html(db, project_id, type_id=None, next_url=None, pres
         <a href="{add_link}" class="btn btn-success">+ Добавить требование</a>
         <table>
             <thead>
-                <tr><th>ID</th><th>Тип</th><th>Стейкхолдер</th><th>Описание</th><th>Приоритет</th><th>Действия</th></tr>
+                <tr><th>ID</th><th>Тип</th>{nfr_header}<th>Стейкхолдер</th><th>Описание</th><th>Приоритет</th><th>Действия</th></tr>
             </thead>
             <tbody>{rows}</tbody>
         </table>'''

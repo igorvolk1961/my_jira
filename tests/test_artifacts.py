@@ -88,6 +88,32 @@ def test_requirements_next_is_escaped(client):
     assert '&lt;script&gt;' in body
 
 
+def test_nonfunctional_requirement_types_crud(client):
+    client.post('/nonfunctional_requirement_types/create', data={'name': 'Тест-НФТ'})
+    assert 'Тест-НФТ' in client.get('/nonfunctional_requirement_types').get_data(as_text=True)
+    tid = _scalar("SELECT id FROM nonfunctional_requirement_type WHERE name='Тест-НФТ'")
+    client.post(f'/nonfunctional_requirement_types/edit/{tid}', data={'name': 'Тест-НФТ-2'})
+    assert 'Тест-НФТ-2' in client.get('/nonfunctional_requirement_types').get_data(as_text=True)
+    client.get(f'/nonfunctional_requirement_types/delete/{tid}')
+    assert 'Тест-НФТ-2' not in client.get('/nonfunctional_requirement_types').get_data(as_text=True)
+
+
+def test_nfr_type_used_on_nonfunctional_artifact(client):
+    client.post('/projects/create', data={'name': 'П', 'priority_id': '1'})
+    nfr_id = _scalar("SELECT id FROM nonfunctional_requirement_type WHERE name='Производительность'")
+    nfr_req_type = _scalar("SELECT id FROM requirement_type WHERE name='Нефункциональное требование'")
+    client.post('/requirements/create', data={'project_id': '1', 'requirement_type_id': str(nfr_req_type),
+                                              'nfr_type_id': str(nfr_id), 'description': 'Отклик < 1с',
+                                              'priority_id': '1'})
+    body = client.get('/artifacts/nonfunctional_requirements').get_data(as_text=True)
+    assert 'Тип НФТ' in body and 'Производительность' in body and 'Отклик' in body
+    # селект типа НФТ берётся из нового справочника
+    form = client.get('/requirements/create').get_data(as_text=True)
+    assert 'name="nfr_type_id"' in form and 'Производительность' in form
+    # тип НФТ виден в карточке требования
+    assert 'Производительность' in client.get('/requirements/1').get_data(as_text=True)
+
+
 def test_current_project_switch(client):
     client.post('/projects/create', data={'name': 'Первый', 'priority_id': '1'})
     client.post('/projects/create', data={'name': 'Второй', 'priority_id': '1'})

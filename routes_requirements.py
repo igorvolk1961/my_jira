@@ -106,11 +106,12 @@ def requirements_list():
 def requirement_create():
     db = get_db()
     if request.method == 'POST':
-        cur = db.execute("""INSERT INTO requirement (project_id, stakeholder_id, requirement_type_id, description, priority_id, acceptance_criteria)
-                     VALUES (?, ?, ?, ?, ?, ?)""",
+        cur = db.execute("""INSERT INTO requirement (project_id, stakeholder_id, requirement_type_id, nfr_type_id, description, priority_id, acceptance_criteria)
+                     VALUES (?, ?, ?, ?, ?, ?, ?)""",
                   (int(request.form['project_id']),
                    request.form.get('stakeholder_id') or None,
                    int(request.form['requirement_type_id']),
+                   request.form.get('nfr_type_id') or None,
                    request.form['description'],
                    int(request.form['priority_id']),
                    request.form.get('acceptance_criteria')))
@@ -131,16 +132,19 @@ def requirement_create():
     pre_project = request.args.get('project_id')
     pre_task = request.args.get('task_id')
     pre_type = request.args.get('requirement_type_id')
+    pre_nfr = request.args.get('nfr_type_id')
     next_url = request.args.get('next')
     projects = db.execute("SELECT * FROM project WHERE is_deleted=0").fetchall()
     stakeholders = db.execute("SELECT * FROM stakeholder WHERE is_deleted=0").fetchall()
     req_types = db.execute("SELECT * FROM requirement_type WHERE is_deleted=0").fetchall()
+    nfr_types = db.execute("SELECT * FROM nonfunctional_requirement_type WHERE is_deleted=0 ORDER BY id").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     db.close()
 
     project_options = ''.join([f'<option value="{p["id"]}" {"selected" if str(p["id"]) == pre_project else ""}>{p["name"]}</option>' for p in projects])
     stakeholder_options = '<option value="">Не выбран</option>' + ''.join([f'<option value="{s["id"]}">{s["last_name"]} {s["first_name"]}</option>' for s in stakeholders])
     type_options = ''.join([f'<option value="{t["id"]}" {"selected" if str(t["id"]) == pre_type else ""}>{t["name"]}</option>' for t in req_types])
+    nfr_type_options = '<option value="">— не выбрано —</option>' + ''.join([f'<option value="{t["id"]}" {"selected" if str(t["id"]) == pre_nfr else ""}>{t["name"]}</option>' for t in nfr_types])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
     if next_url:
         cancel_url = next_url
@@ -166,6 +170,10 @@ def requirement_create():
                 <select name="requirement_type_id" required>{type_options}</select>
             </div>
             <div class="form-group">
+                <label>Тип нефункционального требования</label>
+                <select name="nfr_type_id">{nfr_type_options}</select>
+            </div>
+            <div class="form-group">
                 <label>Описание</label>
                 <textarea name="description" required></textarea>
             </div>
@@ -189,10 +197,12 @@ def requirement_edit(id):
     db = get_db()
     if request.method == 'POST':
         db.execute("""UPDATE requirement SET project_id=?, stakeholder_id=?, requirement_type_id=?,
-                     description=?, priority_id=?, acceptance_criteria=?, updated_at=CURRENT_TIMESTAMP WHERE id=?""",
+                     nfr_type_id=?, description=?, priority_id=?, acceptance_criteria=?,
+                     updated_at=CURRENT_TIMESTAMP WHERE id=?""",
                   (int(request.form['project_id']),
                    request.form.get('stakeholder_id') or None,
                    int(request.form['requirement_type_id']),
+                   request.form.get('nfr_type_id') or None,
                    request.form['description'],
                    int(request.form['priority_id']),
                    request.form.get('acceptance_criteria'), id))
@@ -213,6 +223,7 @@ def requirement_edit(id):
     projects = db.execute("SELECT * FROM project WHERE is_deleted=0").fetchall()
     stakeholders = db.execute("SELECT * FROM stakeholder WHERE is_deleted=0").fetchall()
     req_types = db.execute("SELECT * FROM requirement_type WHERE is_deleted=0").fetchall()
+    nfr_types = db.execute("SELECT * FROM nonfunctional_requirement_type WHERE is_deleted=0 ORDER BY id").fetchall()
     priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0").fetchall()
     db.close()
 
@@ -225,6 +236,9 @@ def requirement_edit(id):
     type_options = ''.join(
         [f'<option value="{t["id"]}" {"selected" if t["id"] == req["requirement_type_id"] else ""}>{t["name"]}</option>'
          for t in req_types])
+    nfr_type_options = '<option value="">— не выбрано —</option>' + ''.join(
+        [f'<option value="{t["id"]}" {"selected" if t["id"] == req["nfr_type_id"] else ""}>{t["name"]}</option>'
+         for t in nfr_types])
     priority_options = ''.join(
         [f'<option value="{p["id"]}" {"selected" if p["id"] == req["priority_id"] else ""}>{p["name"]}</option>' for p
          in priorities])
@@ -245,6 +259,10 @@ def requirement_edit(id):
             <div class="form-group">
                 <label>Тип требования</label>
                 <select name="requirement_type_id" required>{type_options}</select>
+            </div>
+            <div class="form-group">
+                <label>Тип нефункционального требования</label>
+                <select name="nfr_type_id">{nfr_type_options}</select>
             </div>
             <div class="form-group">
                 <label>Описание</label>

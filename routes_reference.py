@@ -383,6 +383,106 @@ def requirement_type_delete(id):
     flash('Тип требования удалён', 'success')
     return redirect(url_for('requirement_types_list'))
 
+#==================== ТИПЫ НЕФУНКЦИОНАЛЬНЫХ ТРЕБОВАНИЙ ====================
+
+@app.route('/nonfunctional_requirement_types')
+def nonfunctional_requirement_types_list():
+    db = get_db()
+    types = db.execute("SELECT * FROM nonfunctional_requirement_type WHERE is_deleted=0 ORDER BY id").fetchall()
+    rows = ''.join([f'''
+        <tr>
+            <td>{t['id']}</td>
+            <td>{t['name']}</td>
+            <td>
+                <a href="{url_for('nonfunctional_requirement_type_edit', id=t['id'])}" class="btn btn-primary">Изменить</a>
+                <a href="{url_for('nonfunctional_requirement_type_delete', id=t['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+            </td>
+        </tr>
+    ''' for t in types])
+
+    content = f'''
+    <div class="card">
+        <h2>Типы нефункциональных требований</h2>
+        <a href="{url_for('nonfunctional_requirement_type_create')}" class="btn btn-success">+ Добавить тип</a>
+        <table>
+            <thead><tr><th>ID</th><th>Название</th><th>Действия</th></tr></thead>
+            <tbody>{rows}</tbody>
+        </table>
+    </div>
+    '''
+    db.close()
+    return render_template_string(BASE_TEMPLATE, title='Типы нефункциональных требований', content=content)
+
+
+@app.route('/nonfunctional_requirement_types/create', methods=['GET', 'POST'])
+def nonfunctional_requirement_type_create():
+    if request.method == 'POST':
+        db = get_db()
+        db.execute("INSERT INTO nonfunctional_requirement_type (name) VALUES (?)", (request.form['name'],))
+        db.commit()
+        db.close()
+        flash('Тип нефункционального требования создан', 'success')
+        return redirect(url_for('nonfunctional_requirement_types_list'))
+
+    content = f'''
+    <div class="card">
+        <h2>Новый тип нефункционального требования</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label>Название</label>
+                <input type="text" name="name" required>
+            </div>
+            <button type="submit" class="btn btn-success">Создать</button>
+            <a href="{url_for('nonfunctional_requirement_types_list')}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Новый тип нефункционального требования', content=content)
+
+
+@app.route('/nonfunctional_requirement_types/edit/<int:id>', methods=['GET', 'POST'])
+def nonfunctional_requirement_type_edit(id):
+    db = get_db()
+    if request.method == 'POST':
+        db.execute("UPDATE nonfunctional_requirement_type SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                  (request.form['name'], id))
+        db.commit()
+        db.close()
+        flash('Тип нефункционального требования обновлён', 'success')
+        return redirect(url_for('nonfunctional_requirement_types_list'))
+
+    nfr = db.execute("SELECT * FROM nonfunctional_requirement_type WHERE id=?", (id,)).fetchone()
+    if not nfr:
+        db.close()
+        flash('Тип нефункционального требования не найден', 'error')
+        return redirect(url_for('nonfunctional_requirement_types_list'))
+    db.close()
+    content = f'''
+    <div class="card">
+        <h2>Редактировать тип нефункционального требования</h2>
+        <form method="POST">
+            <div class="form-group">
+                <label>Название</label>
+                <input type="text" name="name" value="{nfr['name']}" required>
+            </div>
+            <button type="submit" class="btn btn-success">Сохранить</button>
+            <a href="{url_for('nonfunctional_requirement_types_list')}" class="btn btn-primary">Отмена</a>
+        </form>
+    </div>
+    '''
+    return render_template_string(BASE_TEMPLATE, title='Редактировать тип нефункционального требования', content=content)
+
+
+@app.route('/nonfunctional_requirement_types/delete/<int:id>')
+def nonfunctional_requirement_type_delete(id):
+    db = get_db()
+    db.execute("UPDATE nonfunctional_requirement_type SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
+    db.commit()
+    db.close()
+    flash('Тип нефункционального требования удалён', 'success')
+    return redirect(url_for('nonfunctional_requirement_types_list'))
+
+
 #==================== ТИПЫ ДОЛЖНОСТЕЙ ====================
 @app.route('/position_types')
 def position_types_list():

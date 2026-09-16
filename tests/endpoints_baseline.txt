@@ -58,6 +58,10 @@
 /priorities/create	priority_create
 /priorities/delete/<int:id>	priority_delete
 /priorities/edit/<int:id>	priority_edit
+/nonfunctional_requirement_types	nonfunctional_requirement_types_list
+/nonfunctional_requirement_types/create	nonfunctional_requirement_type_create
+/nonfunctional_requirement_types/delete/<int:id>	nonfunctional_requirement_type_delete
+/nonfunctional_requirement_types/edit/<int:id>	nonfunctional_requirement_type_edit
 /project_stages	project_stages_list
 /project_stages/<int:id>	project_stage_detail
 /project_stages/create	project_stage_create

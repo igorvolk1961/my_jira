@@ -2,6 +2,7 @@
 
 LIST_PAGES = [
     '/', '/priorities', '/stakeholder_types', '/stakeholders', '/requirement_types',
+    '/nonfunctional_requirement_types',
     '/projects', '/requirements', '/position_types', '/employee_statuses', '/employees',
     '/stage_types', '/stage_statuses', '/project_stages', '/task_statuses', '/task_types',
     '/tasks', '/subtasks', '/task_assignments', '/events', '/interviews', '/database',

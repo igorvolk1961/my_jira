@@ -312,11 +312,13 @@ def stakeholder_detail(id):
 def requirement_detail(id):
     db = get_db()
     r = db.execute("""
-        SELECT r.*, p.name pname, rt.name type_name, pr.name prio, s.last_name, s.first_name
+        SELECT r.*, p.name pname, rt.name type_name, pr.name prio, s.last_name, s.first_name,
+               nrt.name nfr_type_name
         FROM requirement r JOIN project p ON r.project_id=p.id
         JOIN requirement_type rt ON r.requirement_type_id=rt.id
         JOIN priority pr ON r.priority_id=pr.id
         LEFT JOIN stakeholder s ON r.stakeholder_id=s.id
+        LEFT JOIN nonfunctional_requirement_type nrt ON r.nfr_type_id=nrt.id
         WHERE r.id=? AND r.is_deleted=0
     """, (id,)).fetchone()
     if not r:
@@ -336,6 +338,7 @@ def requirement_detail(id):
         ('Требование', f'#{id}'),
         ('Проект', r['pname']),
         ('Тип', r['type_name']),
+        ('Тип нефункционального требования', r['nfr_type_name'] or '-'),
         ('Приоритет', r['prio']),
         ('Стейкхолдер', f"{r['last_name'] or '-'} {r['first_name'] or ''}"),
         ('Описание', r['description']),
