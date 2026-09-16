@@ -14,6 +14,7 @@ from app_core import (  # noqa: F401
     get_db,
     html,
     json,
+    jsonify,
     project_selector_html,
     redirect,
     render_template_string,
@@ -103,69 +104,24 @@ def _artifact_actions(artifact, clear_label='Очистить'):
             f'onclick="return confirm(\'{clear_label}?\')">{clear_label}</a>')
 
 
-_NBSP = '\u00a0\u00a0'
-
-
 def _user_stories(db, project_id):
     return db.execute("""
-        SELECT us.*, s.last_name, s.first_name, s.middle_name
+        SELECT us.*, st.name AS stakeholder_type_name
         FROM user_story us
-        LEFT JOIN stakeholder s ON us.stakeholder_id = s.id
+        LEFT JOIN stakeholder_type st ON us.stakeholder_type_id = st.id
         WHERE us.project_id=? AND us.is_deleted=0
-        ORDER BY us.id
+        ORDER BY us.position, us.id
     """, (project_id,)).fetchall()
 
 
 def _user_story_sections(db, project_id):
-    return db.execute("SELECT * FROM user_story_section WHERE project_id=? AND is_deleted=0 ORDER BY id",
+    return db.execute("""SELECT * FROM user_story_section
+                         WHERE project_id=? AND is_deleted=0 ORDER BY position, id""",
                       (project_id,)).fetchall()
 
 
-def _section_tree(sections):
-    """Плоский список (раздел, глубина) в порядке обхода иерархии."""
-    children = {}
-    for s in sections:
-        children.setdefault(s['parent_id'], []).append(s)
-    out = []
-
-    def walk(parent, depth):
-        for s in children.get(parent, []):
-            out.append((s, depth))
-            walk(s['id'], depth + 1)
-
-    walk(None, 0)
-    seen = {s['id'] for s, _ in out}
-    for s in sections:
-        if s['id'] not in seen:
-            out.append((s, 0))
-    return out
-
-
 def _user_story_role(st):
-    name = ' '.join(x for x in (st['last_name'], st['first_name'], st['middle_name']) if x)
-    return name or (st['role'] or '…')
-
-
-def _stakeholder_pool(db, project_id):
-    ids = {r['stakeholder_id'] for r in db.execute(
-        "SELECT stakeholder_id FROM project_stakeholder WHERE project_id=? AND is_deleted=0", (project_id,))}
-    proj = db.execute("SELECT main_stakeholder_id FROM project WHERE id=?", (project_id,)).fetchone()
-    if proj and proj['main_stakeholder_id']:
-        ids.add(proj['main_stakeholder_id'])
-    if ids:
-        ph = ','.join('?' * len(ids))
-        return db.execute(f"SELECT * FROM stakeholder WHERE is_deleted=0 AND id IN ({ph}) ORDER BY last_name",
-                          tuple(ids)).fetchall()
-    return db.execute("SELECT * FROM stakeholder WHERE is_deleted=0 ORDER BY last_name").fetchall()
-
-
-def _stakeholder_select_options(stakeholders, selected_id):
-    opts = ['<option value="">— выберите стейкхолдера —</option>']
-    for s in stakeholders:
-        name = ' '.join(x for x in (s['last_name'], s['first_name']) if x)
-        sel = 'selected' if s['id'] == selected_id else ''
-        opts.append(f'<option value="{s["id"]}" {sel}>{html.escape(name)}</option>')
-    return ''.join(opts)
+    return st['stakeholder_type_name'] or st['role'] or '…'
 
 
 def _user_stories_markdown(sections, stories):
@@ -176,28 +132,18 @@ def _user_stories_markdown(sections, stories):
             by_section.setdefault(st['section_id'], []).append(st)
         else:
             unsectioned.append(st)
-    children = {}
-    for s in sections:
-        children.setdefault(s['parent_id'], []).append(s)
 
     def story_line(st):
         return (f'- **{st["identifier"] or "US"}**: Как {_user_story_role(st)}, '
                 f'я хочу {st["want"] or "…"}, чтобы {st["benefit"] or "…"}.')
 
     lines = ['# Пользовательские истории', '']
-
-    def render(sec, depth):
-        lines.append('#' * min(depth + 2, 6) + ' ' + sec['name'])
+    for sec in sections:
+        lines.append('## ' + sec['name'])
         lines.append('')
         for st in by_section.get(sec['id'], []):
             lines.append(story_line(st))
-        if by_section.get(sec['id']):
-            lines.append('')
-        for child in children.get(sec['id'], []):
-            render(child, depth + 1)
-
-    for root in children.get(None, []):
-        render(root, 0)
+        lines.append('')
     if unsectioned:
         lines.append('## Без раздела')
         lines.append('')
@@ -210,153 +156,241 @@ def _user_stories_markdown(sections, stories):
     return '\n'.join(lines).rstrip() + '\n'
 
 
+_US_TEXTAREA = 'width:100%; min-height:44px; resize:vertical; font-family:inherit;'
+
+
+def _us_cell(label, inner, flex='1 1 0'):
+    return (f'<div style="flex:{flex}; min-width:0;">'
+            f'<label style="display:block; font-size:12px; color:#555; margin-bottom:2px;">{label}</label>'
+            f'{inner}</div>')
+
+
 def _user_stories_html(db, project_id):
     stories = _user_stories(db, project_id)
     sections = _user_story_sections(db, project_id)
-    ordered = _section_tree(sections)
-    children = {}
-    for s in sections:
-        children.setdefault(s['parent_id'], []).append(s)
-    stakeholders = _stakeholder_pool(db, project_id)
     types = db.execute("SELECT * FROM stakeholder_type WHERE is_deleted=0 ORDER BY id").fetchall()
-    priorities = db.execute("SELECT * FROM priority WHERE is_deleted=0 ORDER BY weight").fetchall()
     can_edit = can_edit_artifacts()
-
-    def section_options(selected_id=None, exclude_id=None):
-        opts = ['<option value="">— корневой —</option>']
-        for sec, depth in ordered:
-            if exclude_id and sec['id'] == exclude_id:
-                continue
-            sel = 'selected' if sec['id'] == selected_id else ''
-            opts.append(f'<option value="{sec["id"]}" {sel}>{_NBSP * depth}{html.escape(sec["name"])}</option>')
-        return ''.join(opts)
-
     stories_by_section = {}
     for st in stories:
         stories_by_section.setdefault(st['section_id'], []).append(st)
 
-    forms = ''
-    rows = ''
+    def type_options(selected_id):
+        opts = ['<option value="">— не выбран —</option>']
+        for t in types:
+            sel = 'selected' if t['id'] == selected_id else ''
+            opts.append(f'<option value="{t["id"]}" {sel}>{html.escape(t["name"])}</option>')
+        return ''.join(opts)
 
-    def story_rows(sid):
-        nonlocal forms
-        out = ''
-        for st in stories_by_section.get(sid, []):
-            ident = html.escape(st['identifier'] or f'US-{st["id"]}')
-            if can_edit:
-                fid = f'story-{st["id"]}'
-                forms += f'<form id="{fid}" method="POST" action="{url_for("user_story_edit", id=st["id"])}"></form>'
-                out += f'''<tr>
-                    <td class="name-cell"><input name="identifier" form="{fid}" value="{html.escape(st['identifier'] or '', quote=True)}" placeholder="US-N" style="width:100%;"></td>
-                    <td><select name="stakeholder_id" form="{fid}">{_stakeholder_select_options(stakeholders, st["stakeholder_id"])}</select>
-                        <input name="role" form="{fid}" value="{html.escape(st['role'] or '', quote=True)}" placeholder="или текст роли" style="width:100%; margin-top:4px;"></td>
-                    <td><input name="want" form="{fid}" value="{html.escape(st['want'] or '')}" placeholder="я хочу…" style="width:100%;"></td>
-                    <td><input name="benefit" form="{fid}" value="{html.escape(st['benefit'] or '')}" placeholder="чтобы…" style="width:100%;"></td>
-                    <td style="white-space:nowrap;">
-                        <button type="submit" form="{fid}" class="btn btn-success">Сохранить</button>
-                        <a href="{url_for('user_story_delete', id=st['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
-                    </td>
-                </tr>'''
-            else:
-                out += f'''<tr>
-                    <td class="name-cell">{ident}</td>
-                    <td>{html.escape(_user_story_role(st))}</td>
-                    <td>{html.escape(st['want'] or '-')}</td>
-                    <td>{html.escape(st['benefit'] or '-')}</td>
-                    <td></td>
-                </tr>'''
-        return out
+    def story_cells(identifier, want, benefit, selected_type_id, required=False):
+        req = ' required' if required else ''
+        return (
+            _us_cell('ID', f'<textarea name="identifier" style="{_US_TEXTAREA}" placeholder="US-N (авто)">{identifier}</textarea>', flex='0 0 110px')
+            + _us_cell('Как', f'<select name="stakeholder_type_id" style="width:100%;">{type_options(selected_type_id)}</select>', flex='0 0 180px')
+            + _us_cell('Я хочу', f'<textarea name="want" style="{_US_TEXTAREA}" placeholder="я хочу…"{req}>{want}</textarea>')
+            + _us_cell('Чтобы', f'<textarea name="benefit" style="{_US_TEXTAREA}" placeholder="чтобы…"{req}>{benefit}</textarea>')
+        )
 
-    rendered_sections = set()
+    def handle():
+        if not can_edit:
+            return ''
+        return ('<span class="us-drag" draggable="true" title="Перетащить" '
+                'style="cursor:grab; color:#95a5a6; user-select:none;">⠿</span>')
 
-    def section_block(sec, depth):
-        nonlocal rows
-        rendered_sections.add(sec['id'])
-        rows += (f'<tr class="us-section" style="background:#ecf0f1;"><td colspan="5">'
-                 f'<strong>{_NBSP * depth}{html.escape(sec["name"])}</strong></td></tr>')
-        rows += story_rows(sec['id'])
-        for child in children.get(sec['id'], []):
-            section_block(child, depth + 1)
+    def story_view(st):
+        if can_edit:
+            cells = story_cells(html.escape(st['identifier'] or '', quote=True), html.escape(st['want'] or ''),
+                                html.escape(st['benefit'] or ''), st['stakeholder_type_id'])
+            return f'''<form method="POST" action="{url_for('user_story_edit', id=st['id'])}" data-us-kind="story" data-us-id="{st['id']}" style="display:flex; gap:10px; align-items:flex-start; border:1px solid #ddd; border-left:3px solid #3498db; border-radius:6px; padding:8px 10px; margin:6px 0; background:#fff;">
+                <div style="flex:0 0 auto; padding-top:16px;">{handle()}</div>
+                {cells}
+                <div style="flex:0 0 auto; padding-top:16px; white-space:nowrap;">
+                    <button type="submit" class="btn btn-success">Сохранить</button>
+                    <a href="{url_for('user_story_delete', id=st['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+                </div>
+            </form>'''
+        return f'''<div data-us-kind="story" data-us-id="{st['id']}" style="display:flex; gap:10px; align-items:flex-start; border:1px solid #ddd; border-left:3px solid #3498db; border-radius:6px; padding:8px 10px; margin:6px 0; background:#fff;">
+            <div style="flex:0 0 auto; padding-top:2px;">{handle()}</div>
+            {_us_cell('ID', html.escape(st['identifier'] or f'US-{st["id"]}'), flex='0 0 110px')}
+            {_us_cell('Как', html.escape(_user_story_role(st)), flex='0 0 180px')}
+            {_us_cell('Я хочу', f'<div style="white-space:pre-wrap;">{html.escape(st["want"] or "-")}</div>')}
+            {_us_cell('Чтобы', f'<div style="white-space:pre-wrap;">{html.escape(st["benefit"] or "-")}</div>')}
+        </div>'''
 
-    for sec, depth in ordered:
-        if sec['id'] not in rendered_sections:
-            section_block(sec, depth)
-    rows += story_rows(None)
-    if not stories:
-        rows += '<tr><td colspan="5" class="muted">Истории не заданы.</td></tr>'
-
-    sections_editor = ''
-    if can_edit:
-        sec_rows = ''
-        for sec, depth in ordered:
-            fid = f'section-{sec["id"]}'
-            forms += f'<form id="{fid}" method="POST" action="{url_for("user_story_section_edit", id=sec["id"])}"></form>'
-            sec_rows += f'''<tr>
-                <td>{_NBSP * depth}{html.escape(sec['name'])}</td>
-                <td><input name="name" form="{fid}" value="{html.escape(sec['name'], quote=True)}" style="width:100%;"></td>
-                <td><select name="parent_id" form="{fid}">{section_options(sec['parent_id'], exclude_id=sec['id'])}</select></td>
-                <td style="white-space:nowrap;">
-                    <button type="submit" form="{fid}" class="btn btn-success">Сохранить</button>
-                    <a href="{url_for('user_story_section_delete', id=sec['id'])}" class="btn btn-danger" onclick="return confirm('Удалить раздел?')">Удалить</a>
-                </td>
-            </tr>'''
-        add_section = f'''<form method="POST" action="{url_for('user_story_section_create')}" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px;">
-            <input name="name" placeholder="Название раздела" required style="flex:1; min-width:160px;">
-            <select name="parent_id">{section_options()}</select>
-            <button type="submit" class="btn btn-success">+ Раздел</button>
-        </form>'''
-        sections_editor = (f'<details style="margin-bottom:12px;"><summary style="cursor:pointer; font-weight:bold;">'
-                           f'Разделы ({len(sections)})</summary><div style="margin-top:10px;">{add_section}'
-                           f'<table><thead><tr><th>Раздел</th><th>Название</th><th>Родитель</th><th>Действия</th></tr></thead>'
-                           f'<tbody>{sec_rows or "<tr><td colspan=4 class=\"muted\">Разделов нет</td></tr>"}</tbody></table>'
-                           f'</div></details>')
-
-    add_form = ''
-    if can_edit:
-        type_options = ''.join(f'<option value="{t["id"]}">{html.escape(t["name"])}</option>' for t in types)
-        priority_options = ''.join(f'<option value="{p["weight"]}">{html.escape(p["name"])}</option>' for p in priorities)
-        add_form = f'''
-        <form method="POST" action="{url_for('user_story_create')}" style="display:flex; gap:6px; flex-wrap:wrap; margin-top:12px;">
-            <input name="identifier" placeholder="US-N (авто)" style="flex:0 0 120px;">
-            <select name="section_id" style="flex:1; min-width:160px;">{section_options()}</select>
-            <select name="stakeholder_id" style="flex:1; min-width:180px;">{_stakeholder_select_options(stakeholders, None)}</select>
-            <input name="role" placeholder="или текст роли" style="flex:1; min-width:140px;">
-            <input name="want" placeholder="я хочу…" required style="flex:1; min-width:140px;">
-            <input name="benefit" placeholder="чтобы…" required style="flex:1; min-width:140px;">
-            <button type="submit" class="btn btn-success">+ Добавить историю</button>
-        </form>
-        <details style="margin-top:6px;"><summary style="cursor:pointer;">+ Новый стейкхолдер</summary>
-            <form method="POST" action="{url_for('user_story_stakeholder_create')}" style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
-                <input name="last_name" placeholder="Фамилия" required>
-                <input name="first_name" placeholder="Имя" required>
-                <input name="middle_name" placeholder="Отчество">
-                <select name="type_id">{type_options}</select>
-                <select name="priority">{priority_options}</select>
-                <button type="submit" class="btn btn-primary">Создать стейкхолдера</button>
+    def add_story_form(section_id):
+        if not can_edit:
+            return ''
+        cells = story_cells('', '', '', None, required=True)
+        return f'''<details style="margin:6px 0;">
+            <summary style="cursor:pointer; color:#27ae60; font-size:13px;">+ следующая история</summary>
+            <form method="POST" action="{url_for('user_story_create')}" style="display:flex; gap:10px; align-items:flex-start; margin:6px 0; padding:8px 10px; background:#fbfbfb; border:1px dashed #ccc; border-radius:6px;">
+                <input type="hidden" name="section_id" value="{section_id or ''}">
+                {cells}
+                <div style="flex:0 0 auto; padding-top:16px; white-space:nowrap;">
+                    <button type="submit" class="btn btn-success">Добавить</button>
+                </div>
             </form>
         </details>'''
 
+    def add_section_form():
+        if not can_edit:
+            return ''
+        return f'''<details style="margin:12px 0 4px;">
+            <summary style="cursor:pointer; color:#2980b9; font-size:13px;">+ раздел</summary>
+            <form method="POST" action="{url_for('user_story_section_create')}" style="margin:6px 0; padding:8px 10px; background:#fbfbfb; border:1px dashed #ccc; border-radius:6px;">
+                {_us_cell('Название', '<input name="name" required placeholder="Название раздела" style="width:100%;">', flex='0 1 320px')}
+                <div style="margin-top:6px;"><button type="submit" class="btn btn-primary">Добавить раздел</button></div>
+            </form>
+        </details>'''
+
+    def render_section(sec):
+        inner = ''
+        for st in stories_by_section.get(sec['id'], []):
+            inner += story_view(st)
+        inner += add_story_form(sec['id'])
+        actions = ''
+        if can_edit:
+            actions = (f'<a href="#" class="us-rename" data-edit-url="{url_for("user_story_section_edit", id=sec["id"])}" '
+                       f'onclick="event.stopPropagation(); return false;" '
+                       f'style="margin-left:8px; font-weight:normal;">Переименовать</a>'
+                       f'<a href="{url_for("user_story_section_delete", id=sec["id"])}" '
+                       f'onclick="event.stopPropagation(); return confirm(\'Удалить раздел?\');" '
+                       f'style="margin-left:8px; font-weight:normal; color:#c0392b;">Удалить</a>')
+        return (f'<details class="us-section" data-us-kind="section" data-us-id="{sec["id"]}" open '
+                f'style="margin:8px 0; border:1px solid #ddd; border-radius:6px; padding:6px 10px; background:#f7f9fa;">'
+                f'<summary style="cursor:pointer; font-weight:bold;">{handle()} '
+                f'<span class="us-sec-name">{html.escape(sec["name"])}</span>{actions}</summary>'
+                f'<div class="us-section-body" style="margin-top:6px;">{inner}</div></details>')
+
+    body = ''
+    for st in stories_by_section.get(None, []):
+        body += story_view(st)
+    for sec in sections:
+        body += render_section(sec)
+    body += add_section_form()
+    if not stories and not sections:
+        body = '<p class="muted">Разделов и историй пока нет. Добавьте раздел, затем — истории в нём.</p>'
+
     md = _user_stories_markdown(sections, stories)
     md_rendered = _render_markdown(md)
-    toggle = ('<button type="button" class="btn btn-primary" '
-              'onclick="var p=document.getElementById(\'us-markdown\'); '
-              'p.style.display = (p.style.display === \'block\' ? \'none\' : \'block\');">Показать Markdown</button>'
-              '<div id="us-markdown" style="display:none; margin-top:12px;">'
-              '<h3>Markdown (исходник)</h3>'
-              '<textarea readonly style="width:100%; min-height:160px; font-family:monospace;">'
-              + html.escape(md) +
-              '</textarea><h3>Просмотр</h3><div class="markdown-body">'
-              + md_rendered + '</div></div>')
+    text_block = ('<div id="us-text" style="display:none; margin-top:12px;">'
+                  '<h3>Текст</h3>'
+                  '<textarea id="us-text-src" readonly style="width:100%; min-height:160px; font-family:monospace;">'
+                  + html.escape(md) +
+                  '</textarea><h3>Просмотр</h3><div class="markdown-body">'
+                  + md_rendered + '</div></div>')
 
-    return f'''
-        {forms}
-        {sections_editor}
-        <table>
-            <thead><tr><th>ID</th><th>Как…</th><th>Я хочу…</th><th>Чтобы…</th><th>Действия</th></tr></thead>
-            <tbody>{rows}</tbody>
-        </table>
-        {add_form}
-        <div style="margin-top:12px;">{toggle}</div>'''
+    tree = (f'<div id="us-tree" data-reorder-url="{url_for("user_story_reorder")}" '
+            f'style="max-height:60vh; overflow-y:auto; overflow-x:hidden; padding-right:6px;">{body}</div>')
+    script = ''
+    if can_edit:
+        script = '''
+<script>
+(function(){
+  var root = document.getElementById('us-tree');
+  if (!root) return;
+  var drag = null;
+  function owner(node){ return node && node.closest ? node.closest('[data-us-kind]') : null; }
+  root.querySelectorAll('.us-drag').forEach(function(h){
+    h.addEventListener('dragstart', function(e){
+      drag = owner(h);
+      if (!drag) return;
+      e.stopPropagation();
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', drag.getAttribute('data-us-id')); } catch(_) {}
+    });
+    h.addEventListener('dragend', function(){ drag = null; });
+  });
+  root.querySelectorAll('[data-us-kind]').forEach(function(target){
+    target.addEventListener('dragover', function(e){
+      if (!drag || drag === target) return;
+      var kd = drag.getAttribute('data-us-kind');
+      var kt = target.getAttribute('data-us-kind');
+      if (kd === kt || kd === 'story') e.preventDefault();
+    });
+    target.addEventListener('drop', function(e){
+      if (!drag || drag === target) return;
+      var kd = drag.getAttribute('data-us-kind');
+      var kt = target.getAttribute('data-us-kind');
+      e.preventDefault(); e.stopPropagation();
+      if (kd === 'story') {
+        if (kt === 'story') {
+          var r = target.getBoundingClientRect();
+          var after = (e.clientY - r.top) > r.height / 2;
+          target.parentNode.insertBefore(drag, after ? target.nextSibling : target);
+        } else {
+          var bodyEl = target.querySelector('.us-section-body') || target;
+          bodyEl.appendChild(drag);
+        }
+      } else if (kd === 'section' && kt === 'section') {
+        var rs = target.getBoundingClientRect();
+        var afterS = (e.clientY - rs.top) > rs.height / 2;
+        target.parentNode.insertBefore(drag, afterS ? target.nextSibling : target);
+      } else {
+        return;
+      }
+      drag = null;
+      save();
+    });
+  });
+  root.querySelectorAll('.us-rename').forEach(function(link){
+    link.addEventListener('click', function(e){
+      e.preventDefault(); e.stopPropagation();
+      var summary = link.closest('summary');
+      var span = summary ? summary.querySelector('.us-sec-name') : null;
+      if (!span || span.getAttribute('data-editing')) return;
+      var old = span.textContent;
+      span.setAttribute('data-editing', '1');
+      var input = document.createElement('input');
+      input.type = 'text';
+      input.value = old;
+      input.style.minWidth = '200px';
+      span.textContent = '';
+      span.appendChild(input);
+      input.focus();
+      input.select();
+      var done = false;
+      function finish(keep){
+        if (done) return;
+        done = true;
+        var val = input.value.trim();
+        span.textContent = (keep && val) ? val : old;
+        span.removeAttribute('data-editing');
+        if (keep && val && val !== old) {
+          fetch(link.getAttribute('data-edit-url'), {
+            method: 'POST',
+            headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+            body: 'name=' + encodeURIComponent(val)
+          }).catch(function(){});
+        }
+      }
+      input.addEventListener('click', function(ev){ ev.stopPropagation(); });
+      input.addEventListener('keydown', function(ev){
+        ev.stopPropagation();
+        if (ev.key === 'Enter') { ev.preventDefault(); finish(true); }
+        else if (ev.key === 'Escape') { finish(false); }
+      });
+      input.addEventListener('blur', function(){ finish(true); });
+    });
+  });
+  function save(){
+    var sections = [], stories = [];
+    root.querySelectorAll('.us-section').forEach(function(sec){
+      sections.push(sec.getAttribute('data-us-id'));
+    });
+    root.querySelectorAll('[data-us-kind="story"]').forEach(function(st){
+      var sec = st.closest('.us-section');
+      stories.push({id: st.getAttribute('data-us-id'), section_id: sec ? sec.getAttribute('data-us-id') : null});
+    });
+    fetch(root.getAttribute('data-reorder-url'), {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sections: sections, stories: stories})
+    }).catch(function(){});
+  }
+})();
+</script>'''
+
+    return f'''{tree}{script}{text_block}'''
 
 
 def _artifact_body(db, artifact, project):
@@ -410,6 +444,21 @@ def _artifact_body(db, artifact, project):
     return f'''{actions}{meta}<div class="markdown-body">{rendered}</div>'''
 
 
+def _user_stories_header_buttons(project):
+    """Кнопки «Показать текст» и «Скачать» для шапки страницы."""
+    filename = f'user_stories_{project["id"]}.txt'
+    return (
+        '<button type="button" class="btn btn-primary" '
+        'onclick="var p=document.getElementById(\'us-text\'); '
+        'p.style.display=(p.style.display===\'block\'?\'none\':\'block\');">Показать текст</button>'
+        '<button type="button" class="btn btn-success" '
+        'onclick="var s=document.getElementById(\'us-text-src\'); '
+        'var b=new Blob([s.value],{type:\'text/plain;charset=utf-8\'}); '
+        'var a=document.createElement(\'a\'); a.href=URL.createObjectURL(b); '
+        'a.download=' + json.dumps(filename) + '; document.body.appendChild(a); a.click(); a.remove();">Скачать</button>'
+    )
+
+
 @app.route('/artifacts/<key>')
 def artifact_view(key):
     artifact = ARTIFACTS_BY_KEY.get(key)
@@ -422,11 +471,13 @@ def artifact_view(key):
         db.close()
         return _no_project_page(artifact['title'])
     selector = project_selector_html(db, project['id'], next_url=url_for('artifact_view', key=key))
+    header_buttons = _user_stories_header_buttons(project) if artifact['kind'] == 'user_stories' else ''
     body = _artifact_body(db, artifact, project)
     db.close()
     content = f'''
-    <div class="card" style="padding:12px 20px;">
+    <div class="card" style="padding:12px 20px; display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
         {selector}
+        {header_buttons}
     </div>
     <div class="card">
         <h2>{html.escape(artifact['title'])}</h2>
@@ -544,7 +595,8 @@ def artifact_clear(key):
 
 # ==================== ПОЛЬЗОВАТЕЛЬСКИЕ ИСТОРИИ ====================
 
-_US_REDIRECT = lambda: redirect(url_for('artifact_view', key='user_stories'))  # noqa: E731
+def _us_redirect():
+    return redirect(url_for('artifact_view', key='user_stories'))
 
 
 def _next_user_story_identifier(db, project_id):
@@ -564,19 +616,6 @@ def _valid_section_id(db, project_id, value):
     return sid if row else None
 
 
-def _section_descendant_ids(db, project_id, root_id):
-    ids = set()
-    frontier = [root_id]
-    while frontier:
-        cur = frontier.pop()
-        for r in db.execute("""SELECT id FROM user_story_section
-                               WHERE project_id=? AND parent_id=? AND is_deleted=0""", (project_id, cur)):
-            if r['id'] not in ids:
-                ids.add(r['id'])
-                frontier.append(r['id'])
-    return ids
-
-
 @app.route('/artifacts/user_stories/create', methods=['POST'])
 def user_story_create():
     db = get_db()
@@ -584,17 +623,19 @@ def user_story_create():
     if not project:
         db.close()
         flash('Сначала выберите проект', 'error')
-        return _US_REDIRECT()
+        return _us_redirect()
     identifier = (request.form.get('identifier') or '').strip() or _next_user_story_identifier(db, project['id'])
-    db.execute("""INSERT INTO user_story (project_id, section_id, identifier, stakeholder_id, role, want, benefit)
+    position = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM user_story WHERE project_id=?",
+                          (project['id'],)).fetchone()[0]
+    db.execute("""INSERT INTO user_story (project_id, section_id, identifier, stakeholder_type_id, want, benefit, position)
                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
                (project['id'], _valid_section_id(db, project['id'], request.form.get('section_id')),
-                identifier, request.form.get('stakeholder_id') or None, request.form.get('role'),
-                request.form.get('want'), request.form.get('benefit')))
+                identifier, request.form.get('stakeholder_type_id') or None,
+                request.form.get('want'), request.form.get('benefit'), position))
     db.commit()
     db.close()
     flash('История добавлена', 'success')
-    return _US_REDIRECT()
+    return _us_redirect()
 
 
 @app.route('/artifacts/user_stories/edit/<int:id>', methods=['POST'])
@@ -604,17 +645,16 @@ def user_story_edit(id):
     if not row:
         db.close()
         flash('История не найдена', 'error')
-        return _US_REDIRECT()
+        return _us_redirect()
     identifier = (request.form.get('identifier') or '').strip() or row['identifier'] or f'US-{id}'
-    db.execute("""UPDATE user_story SET section_id=?, identifier=?, stakeholder_id=?, role=?, want=?, benefit=?,
+    db.execute("""UPDATE user_story SET identifier=?, stakeholder_type_id=?, want=?, benefit=?,
                   updated_at=CURRENT_TIMESTAMP WHERE id=?""",
-               (_valid_section_id(db, row['project_id'], request.form.get('section_id')), identifier,
-                request.form.get('stakeholder_id') or None, request.form.get('role'),
+               (identifier, request.form.get('stakeholder_type_id') or None,
                 request.form.get('want'), request.form.get('benefit'), id))
     db.commit()
     db.close()
     flash('История обновлена', 'success')
-    return _US_REDIRECT()
+    return _us_redirect()
 
 
 @app.route('/artifacts/user_stories/delete/<int:id>')
@@ -624,7 +664,7 @@ def user_story_delete(id):
     db.commit()
     db.close()
     flash('История удалена', 'success')
-    return _US_REDIRECT()
+    return _us_redirect()
 
 
 @app.route('/artifacts/user_stories/sections/create', methods=['POST'])
@@ -635,14 +675,15 @@ def user_story_section_create():
     if not project or not name:
         db.close()
         flash('Укажите проект и название раздела', 'error')
-        return _US_REDIRECT()
-    parent_id = _valid_section_id(db, project['id'], request.form.get('parent_id'))
-    db.execute("INSERT INTO user_story_section (project_id, parent_id, name) VALUES (?, ?, ?)",
-               (project['id'], parent_id, name))
+        return _us_redirect()
+    position = db.execute("SELECT COALESCE(MAX(position), -1) + 1 FROM user_story_section WHERE project_id=?",
+                          (project['id'],)).fetchone()[0]
+    db.execute("INSERT INTO user_story_section (project_id, name, position) VALUES (?, ?, ?)",
+               (project['id'], name, position))
     db.commit()
     db.close()
     flash('Раздел добавлен', 'success')
-    return _US_REDIRECT()
+    return _us_redirect()
 
 
 @app.route('/artifacts/user_stories/sections/edit/<int:id>', methods=['POST'])
@@ -652,19 +693,13 @@ def user_story_section_edit(id):
     name = (request.form.get('name') or '').strip()
     if not sec or not name:
         db.close()
-        flash('Раздел не найден', 'error')
-        return _US_REDIRECT()
-    parent_id = _valid_section_id(db, sec['project_id'], request.form.get('parent_id'))
-    if parent_id == id or (parent_id and parent_id in _section_descendant_ids(db, sec['project_id'], id)):
-        db.close()
-        flash('Нельзя вложить раздел в себя или своего потомка', 'error')
-        return _US_REDIRECT()
-    db.execute("UPDATE user_story_section SET name=?, parent_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-               (name, parent_id, id))
+        flash('Раздел не найден или не задано название', 'error')
+        return _us_redirect()
+    db.execute("UPDATE user_story_section SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (name, id))
     db.commit()
     db.close()
-    flash('Раздел обновлён', 'success')
-    return _US_REDIRECT()
+    flash('Раздел переименован', 'success')
+    return _us_redirect()
 
 
 @app.route('/artifacts/user_stories/sections/delete/<int:id>')
@@ -674,43 +709,57 @@ def user_story_section_delete(id):
     if not sec:
         db.close()
         flash('Раздел не найден', 'error')
-        return _US_REDIRECT()
-    has_children = db.execute("""SELECT 1 FROM user_story_section
-                                 WHERE parent_id=? AND is_deleted=0 LIMIT 1""", (id,)).fetchone()
-    has_stories = db.execute("""SELECT 1 FROM user_story
-                                WHERE section_id=? AND is_deleted=0 LIMIT 1""", (id,)).fetchone()
+        return _us_redirect()
+    has_children = db.execute("SELECT 1 FROM user_story_section WHERE parent_id=? AND is_deleted=0 LIMIT 1", (id,)).fetchone()
+    has_stories = db.execute("SELECT 1 FROM user_story WHERE section_id=? AND is_deleted=0 LIMIT 1", (id,)).fetchone()
     if has_children or has_stories:
         db.close()
         flash('Раздел не пуст: сначала перенесите или удалите вложенные разделы и истории', 'error')
-        return _US_REDIRECT()
+        return _us_redirect()
     db.execute("UPDATE user_story_section SET is_deleted=1, updated_at=CURRENT_TIMESTAMP WHERE id=?", (id,))
     db.commit()
     db.close()
     flash('Раздел удалён', 'success')
-    return _US_REDIRECT()
+    return _us_redirect()
 
 
-@app.route('/artifacts/user_stories/stakeholder/create', methods=['POST'])
-def user_story_stakeholder_create():
+@app.route('/artifacts/user_stories/reorder', methods=['POST'])
+def user_story_reorder():
+    """Сохранение порядка разделов и историй после перетаскивания."""
     db = get_db()
     project = current_project_row(db)
-    last_name = (request.form.get('last_name') or '').strip()
-    first_name = (request.form.get('first_name') or '').strip()
-    if not project or not (last_name and first_name):
+    if not project:
         db.close()
-        flash('Укажите фамилию и имя стейкхолдера', 'error')
-        return _US_REDIRECT()
-    type_id = request.form.get('type_id')
-    if not type_id:
-        first_type = db.execute("SELECT id FROM stakeholder_type WHERE is_deleted=0 ORDER BY id LIMIT 1").fetchone()
-        type_id = first_type['id'] if first_type else None
-    cur = db.execute("""INSERT INTO stakeholder (last_name, first_name, middle_name, type_id, priority)
-                        VALUES (?, ?, ?, ?, ?)""",
-                     (last_name, first_name, (request.form.get('middle_name') or '').strip() or None,
-                      type_id, int(request.form.get('priority') or 3)))
-    db.execute("INSERT OR IGNORE INTO project_stakeholder (project_id, stakeholder_id) VALUES (?, ?)",
-               (project['id'], cur.lastrowid))
+        return jsonify(ok=False, error='no project'), 400
+    data = request.get_json(silent=True) or {}
+    section_ids = {s['id'] for s in _user_story_sections(db, project['id'])}
+
+    for i, sid in enumerate(data.get('sections') or []):
+        try:
+            sid = int(sid)
+        except (TypeError, ValueError):
+            continue
+        if sid in section_ids:
+            db.execute("UPDATE user_story_section SET position=? WHERE id=? AND project_id=?",
+                       (i, sid, project['id']))
+
+    for i, item in enumerate(data.get('stories') or []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            story_id = int(item.get('id'))
+        except (TypeError, ValueError):
+            continue
+        sec = item.get('section_id')
+        try:
+            sec = int(sec) if sec not in (None, '', 'null') else None
+        except (TypeError, ValueError):
+            sec = None
+        if sec is not None and sec not in section_ids:
+            sec = None
+        db.execute("UPDATE user_story SET position=?, section_id=? WHERE id=? AND project_id=?",
+                   (i, sec, story_id, project['id']))
+
     db.commit()
     db.close()
-    flash('Стейкхолдер создан и добавлен к проекту', 'success')
-    return _US_REDIRECT()
+    return jsonify(ok=True)

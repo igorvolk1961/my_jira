@@ -5,10 +5,10 @@
 /artifacts/user_stories/create	user_story_create
 /artifacts/user_stories/delete/<int:id>	user_story_delete
 /artifacts/user_stories/edit/<int:id>	user_story_edit
+/artifacts/user_stories/reorder	user_story_reorder
 /artifacts/user_stories/sections/create	user_story_section_create
 /artifacts/user_stories/sections/delete/<int:id>	user_story_section_delete
 /artifacts/user_stories/sections/edit/<int:id>	user_story_section_edit
-/artifacts/user_stories/stakeholder/create	user_story_stakeholder_create
 /comments/create	comment_create
 /comments/delete/<int:id>	comment_delete
 /database	database_index

@@ -525,6 +525,7 @@ def init_db(path=None):
             project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
             parent_id INTEGER REFERENCES user_story_section(id),
             name TEXT NOT NULL,
+            position INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_deleted INTEGER DEFAULT 0
@@ -537,9 +538,11 @@ def init_db(path=None):
             section_id INTEGER REFERENCES user_story_section(id),
             identifier TEXT,
             stakeholder_id INTEGER REFERENCES stakeholder(id),
+            stakeholder_type_id INTEGER REFERENCES stakeholder_type(id),
             role TEXT,
             want TEXT,
             benefit TEXT,
+            position INTEGER DEFAULT 0,
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_deleted INTEGER DEFAULT 0
@@ -586,6 +589,15 @@ def init_db(path=None):
         db.execute("ALTER TABLE user_story ADD COLUMN section_id INTEGER REFERENCES user_story_section(id)")
     if 'stakeholder_id' not in uscols:
         db.execute("ALTER TABLE user_story ADD COLUMN stakeholder_id INTEGER REFERENCES stakeholder(id)")
+    if 'position' not in uscols:
+        db.execute("ALTER TABLE user_story ADD COLUMN position INTEGER DEFAULT 0")
+    if 'stakeholder_type_id' not in uscols:
+        db.execute("ALTER TABLE user_story ADD COLUMN stakeholder_type_id INTEGER REFERENCES stakeholder_type(id)")
+        if 'stakeholder_id' in uscols:
+            # Перенос выбранного стейкхолдера в его тип (роль «Как …»)
+            db.execute("""UPDATE user_story SET stakeholder_type_id =
+                          (SELECT type_id FROM stakeholder WHERE stakeholder.id = user_story.stakeholder_id)
+                          WHERE stakeholder_id IS NOT NULL AND stakeholder_type_id IS NULL""")
     if 'section' in uscols:
         # Перенос текстовых разделов в иерархию разделов (миграция старой версии)
         rows = db.execute("""SELECT DISTINCT project_id, section FROM user_story
@@ -601,6 +613,9 @@ def init_db(path=None):
             db.execute("""UPDATE user_story SET section_id=?
                           WHERE project_id=? AND section=? AND section_id IS NULL""",
                        (sec_id, row['project_id'], row['section']))
+    ussection_cols = [r[1] for r in db.execute("PRAGMA table_info(user_story_section)").fetchall()]
+    if 'position' not in ussection_cols:
+        db.execute("ALTER TABLE user_story_section ADD COLUMN position INTEGER DEFAULT 0")
 
     # Типы нефункциональных требований: предзаполнение (для новых и существующих БД)
     for nfr in NONFUNCTIONAL_REQUIREMENT_TYPES:
@@ -953,7 +968,7 @@ ANALYST_WRITE_ENDPOINTS = {
     'artifact_edit', 'artifact_clear',
     'user_story_create', 'user_story_edit', 'user_story_delete',
     'user_story_section_create', 'user_story_section_edit', 'user_story_section_delete',
-    'user_story_stakeholder_create',
+    'user_story_reorder',
 }
 
 WRITE_ENDPOINTS = ADMIN_WRITE_ENDPOINTS | USER_WRITE_ENDPOINTS | ANALYST_WRITE_ENDPOINTS
