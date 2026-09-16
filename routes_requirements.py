@@ -43,6 +43,7 @@ from app_core import (  # noqa: F401
     redirect,
     render_template_string,
     request,
+    safe_next,
     secure_filename,
     send_file,
     session,
@@ -120,12 +121,17 @@ def requirement_create():
         db.commit()
         db.close()
         flash('Требование создано', 'success')
+        next_url = request.form.get('next')
+        if next_url:
+            return redirect(safe_next(next_url, url_for('requirements_list')))
         if task_id:
             return redirect(url_for('task_detail', id=int(task_id)))
         return redirect(url_for('project_detail', id=int(request.form['project_id'])))
 
     pre_project = request.args.get('project_id')
     pre_task = request.args.get('task_id')
+    pre_type = request.args.get('requirement_type_id')
+    next_url = request.args.get('next')
     projects = db.execute("SELECT * FROM project WHERE is_deleted=0").fetchall()
     stakeholders = db.execute("SELECT * FROM stakeholder WHERE is_deleted=0").fetchall()
     req_types = db.execute("SELECT * FROM requirement_type WHERE is_deleted=0").fetchall()
@@ -134,15 +140,19 @@ def requirement_create():
 
     project_options = ''.join([f'<option value="{p["id"]}" {"selected" if str(p["id"]) == pre_project else ""}>{p["name"]}</option>' for p in projects])
     stakeholder_options = '<option value="">Не выбран</option>' + ''.join([f'<option value="{s["id"]}">{s["last_name"]} {s["first_name"]}</option>' for s in stakeholders])
-    type_options = ''.join([f'<option value="{t["id"]}">{t["name"]}</option>' for t in req_types])
+    type_options = ''.join([f'<option value="{t["id"]}" {"selected" if str(t["id"]) == pre_type else ""}>{t["name"]}</option>' for t in req_types])
     priority_options = ''.join([f'<option value="{p["id"]}">{p["name"]}</option>' for p in priorities])
-    cancel_url = url_for('task_detail', id=int(pre_task)) if pre_task else (url_for('project_detail', id=int(pre_project)) if pre_project else url_for('requirements_list'))
+    if next_url:
+        cancel_url = next_url
+    else:
+        cancel_url = url_for('task_detail', id=int(pre_task)) if pre_task else (url_for('project_detail', id=int(pre_project)) if pre_project else url_for('requirements_list'))
 
     content = f'''
     <div class="card">
         <h2>Новое требование</h2>
         <form method="POST">
             <input type="hidden" name="task_id" value="{pre_task or ''}">
+            <input type="hidden" name="next" value="{next_url or ''}">
             <div class="form-group">
                 <label>Проект</label>
                 <select name="project_id" required>{project_options}</select>
@@ -189,8 +199,12 @@ def requirement_edit(id):
         db.commit()
         db.close()
         flash('Требование обновлено', 'success')
+        next_url = request.form.get('next')
+        if next_url:
+            return redirect(safe_next(next_url, url_for('requirements_list')))
         return redirect(url_for('requirements_list'))
 
+    next_url = request.args.get('next')
     req = db.execute("SELECT * FROM requirement WHERE id=?", (id,)).fetchone()
     if not req:
         db.close()
@@ -219,6 +233,7 @@ def requirement_edit(id):
     <div class="card">
         <h2>Редактировать требование</h2>
         <form method="POST">
+            <input type="hidden" name="next" value="{next_url or ''}">
             <div class="form-group">
                 <label>Проект</label>
                 <select name="project_id" required>{project_options}</select>
@@ -244,7 +259,7 @@ def requirement_edit(id):
                 <textarea name="acceptance_criteria">{req['acceptance_criteria'] or ''}</textarea>
             </div>
             <button type="submit" class="btn btn-success">Сохранить</button>
-            <a href="{url_for('requirements_list')}" class="btn btn-primary">Отмена</a>
+            <a href="{next_url or url_for('requirements_list')}" class="btn btn-primary">Отмена</a>
         </form>
     </div>
     '''
@@ -257,6 +272,6 @@ def requirement_delete(id):
     db.commit()
     db.close()
     flash('Требование удалено', 'success')
-    return redirect(url_for('requirements_list'))
+    return redirect(safe_next(request.args.get('next'), url_for('requirements_list')))
 
 

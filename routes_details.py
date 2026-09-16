@@ -57,6 +57,7 @@ from app_core import (  # noqa: F401
     assigner_sql,
     current_user,
     is_admin,
+    role_label,
     status_form,
 )
 
@@ -67,7 +68,7 @@ def employee_detail(id):
     db = get_db()
     emp = db.execute("""
         SELECT e.*, pt.name position_name, es.name status_name, es.is_available,
-               u.role AS user_role, u.login AS user_login
+               u.role AS user_role, u.is_analyst AS user_analyst, u.login AS user_login
         FROM employee e
         JOIN position_type pt ON e.position_type_id=pt.id
         JOIN employee_status es ON e.status_id=es.id
@@ -110,7 +111,7 @@ def employee_detail(id):
         ('Сотрудник', f"{emp['last_name']} {emp['first_name']} {emp['middle_name'] or ''}"),
         ('Должность', html.escape(emp['position_name'])),
         ('Статус', f'<span class="badge" style="background: {"#27ae60" if emp["is_available"] else "#e74c3c"}">{html.escape(emp["status_name"])}</span>'),
-        ('Роль', (emp['user_role'] and {'admin': 'администратор', 'user': 'пользователь'}.get(emp['user_role'], emp['user_role'])) or '—'),
+        ('Роль', role_label(emp['user_role'], emp['user_analyst']) if emp['user_role'] else '—'),
         ('Логин', html.escape(emp['user_login']) if emp['user_login'] else '—'),
         ('Подчинённые', f"{emp['subordinates_total']} (доступно: {emp['subordinates_available']})"),
         ('Загрузка', f'{round(load * 100)}%'),

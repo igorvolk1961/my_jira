@@ -13,6 +13,7 @@ import routes_reference  # noqa: F401
 import routes_stakeholders  # noqa: F401
 import routes_projects  # noqa: F401
 import routes_requirements  # noqa: F401
+import routes_artifacts  # noqa: F401
 import routes_employees  # noqa: F401
 import routes_stages  # noqa: F401
 import routes_tasks  # noqa: F401

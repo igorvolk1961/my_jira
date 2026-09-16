@@ -51,7 +51,14 @@ from app_core import (  # noqa: F401
     sync_stakeholder_for_employee,
     url_for,
 )
-from app_core import current_user, is_admin  # noqa: F401
+from app_core import (  # noqa: F401
+    current_user,
+    is_admin,
+    is_analyst,
+    role_label,
+    sync_analyst_role_from_position,
+    sync_position_from_analyst_role,
+)
 
 #==================== СОТРУДНИКИ ====================
 @app.route('/employees')
@@ -59,7 +66,7 @@ def employees_list():
     db = get_db()
     employees = db.execute("""
         SELECT e.*, pt.name as position_name, es.name as status_name, es.is_available,
-               u.id AS user_id, u.role AS user_role
+               u.id AS user_id, u.role AS user_role, u.is_analyst AS user_analyst
         FROM employee e
         JOIN position_type pt ON e.position_type_id = pt.id
         JOIN employee_status es ON e.status_id = es.id
@@ -84,12 +91,15 @@ def employees_list():
             opts = ''.join([
                 f'<option value="{r}" {"selected" if r == e["user_role"] else ""}>{label}</option>'
                 for r, label in role_labels.items()])
+            checked = 'checked' if e['user_analyst'] else ''
             role_cell = (f'<form method="POST" action="{url_for("employee_role_change", id=e["id"])}" '
-                         f'style="display:inline-flex; gap:4px; align-items:center; margin:0;">'
+                         f'style="display:inline-flex; gap:4px; align-items:center; margin:0; flex-wrap:wrap;">'
                          f'<select name="role">{opts}</select>'
+                         f'<label style="white-space:nowrap;"><input type="checkbox" name="is_analyst" value="1" {checked} '
+                         f'style="width:auto; display:inline; margin-right:4px;">сист. аналитик</label>'
                          f'<button type="submit" class="btn btn-primary" style="margin:0;">OK</button></form>')
         else:
-            role_cell = role_labels.get(e['user_role'], e['user_role'] or '—')
+            role_cell = role_label(e['user_role'], e['user_analyst'])
         rows += f'''
         <tr>
             <td>{e['id']}</td>
@@ -140,6 +150,7 @@ def employee_create():
         if pid:
             db.execute("INSERT INTO project_employee (project_id, employee_id) VALUES (?, ?)", (int(pid), new_id))
         sync_stakeholder_for_employee(db, new_id, bool(is_sh))
+        sync_analyst_role_from_position(db, new_id)
         db.commit()
         db.close()
         flash('Сотрудник создан', 'success')
@@ -213,6 +224,7 @@ def employee_edit(id):
                    int(request.form.get('subordinates_total', 0)),
                    int(request.form.get('subordinates_available', 0)), is_sh, id))
         sync_stakeholder_for_employee(db, id, bool(is_sh))
+        sync_analyst_role_from_position(db, id)
         db.commit()
         db.close()
         flash('Сотрудник обновлён', 'success')
@@ -306,6 +318,7 @@ def employee_role_change(id):
     db = get_db()
     me = current_user()
     role = request.form.get('role')
+    want_analyst = 1 if request.form.get('is_analyst') else 0
     if role not in ('admin', 'user'):
         db.close()
         flash('Некорректная роль', 'error')
@@ -319,10 +332,12 @@ def employee_role_change(id):
         db.close()
         flash('Нельзя изменить собственную роль', 'error')
         return redirect(url_for('employees_list'))
-    db.execute("UPDATE app_user SET role=?, updated_at=CURRENT_TIMESTAMP WHERE id=?", (role, user['id']))
+    db.execute("UPDATE app_user SET role=?, is_analyst=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+               (role, want_analyst, user['id']))
+    sync_position_from_analyst_role(db, id, bool(want_analyst))
     db.commit()
     db.close()
-    flash('Роль пользователя обновлена', 'success')
+    flash('Роли пользователя обновлены', 'success')
     return redirect(url_for('employees_list'))
 
 

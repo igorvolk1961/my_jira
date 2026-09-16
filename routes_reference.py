@@ -393,6 +393,7 @@ def position_types_list():
         <tr>
             <td>{t['id']}</td>
             <td>{t['name']}</td>
+            <td>{"да" if t['is_analyst'] else "—"}</td>
             <td>
                 <a href="{url_for('position_type_edit', id=t['id'])}" class="btn btn-primary">Изменить</a>
                 <a href="{url_for('position_type_delete', id=t['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
@@ -405,7 +406,7 @@ def position_types_list():
         <h2>Типы должностей</h2>
         <a href="{url_for('position_type_create')}" class="btn btn-success">+ Добавить тип</a>
         <table>
-            <thead><tr><th>ID</th><th>Название</th><th>Действия</th></tr></thead>
+            <thead><tr><th>ID</th><th>Название</th><th>Роль системного аналитика</th><th>Действия</th></tr></thead>
             <tbody>{rows}</tbody>
         </table>
     </div>
@@ -417,7 +418,8 @@ def position_types_list():
 def position_type_create():
     if request.method == 'POST':
         db = get_db()
-        db.execute("INSERT INTO position_type (name) VALUES (?)", (request.form['name'],))
+        is_analyst = 1 if request.form.get('is_analyst') else 0
+        db.execute("INSERT INTO position_type (name, is_analyst) VALUES (?, ?)", (request.form['name'], is_analyst))
         db.commit()
         db.close()
         flash('Тип должности создан', 'success')
@@ -430,6 +432,9 @@ def position_type_create():
                 <label>Название</label>
                 <input type="text" name="name" required>
             </div>
+            <div class="form-group">
+                <label><input type="checkbox" name="is_analyst" value="1" style="width:auto; display:inline; margin-right:6px;"> Даёт роль системного аналитика</label>
+            </div>
             <button type="submit" class="btn btn-success">Создать</button>
             <a href="{url_for('position_types_list')}" class="btn btn-primary">Отмена</a>
         </form>
@@ -441,8 +446,9 @@ def position_type_create():
 def position_type_edit(id):
     db = get_db()
     if request.method == 'POST':
-        db.execute("UPDATE position_type SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
-                  (request.form['name'], id))
+        is_analyst = 1 if request.form.get('is_analyst') else 0
+        db.execute("UPDATE position_type SET name=?, is_analyst=?, updated_at=CURRENT_TIMESTAMP WHERE id=?",
+                  (request.form['name'], is_analyst, id))
         db.commit()
         db.close()
         flash('Тип должности обновлён', 'success')
@@ -462,6 +468,9 @@ def position_type_edit(id):
             <div class="form-group">
                 <label>Название</label>
                 <input type="text" name="name" value="{ptype['name']}" required>
+            </div>
+            <div class="form-group">
+                <label><input type="checkbox" name="is_analyst" value="1" style="width:auto; display:inline; margin-right:6px;" {'checked' if ptype['is_analyst'] else ''}> Даёт роль системного аналитика</label>
             </div>
             <button type="submit" class="btn btn-success">Сохранить</button>
             <a href="{url_for('position_types_list')}" class="btn btn-primary">Отмена</a>

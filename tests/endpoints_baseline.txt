@@ -1,4 +1,7 @@
 /	index
+/artifacts/<key>	artifact_view
+/artifacts/<key>/clear	artifact_clear
+/artifacts/<key>/edit	artifact_edit
 /comments/create	comment_create
 /comments/delete/<int:id>	comment_delete
 /database	database_index
@@ -135,6 +138,7 @@
 /register	register
 /chat	chat_index
 /chat/post	chat_post
+/current-project/<int:id>	current_project_set
 /audit	audit_index
 /settings	settings_index
 /my_tasks	my_tasks

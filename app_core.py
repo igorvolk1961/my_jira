@@ -47,6 +47,49 @@ def get_db():
     db.execute("PRAGMA foreign_keys = ON")
     return db
 
+
+def list_projects(db):
+    return db.execute("SELECT id, name FROM project WHERE is_deleted=0 ORDER BY id").fetchall()
+
+
+def current_project_row(db=None):
+    """Текущий проект из сессии; при отсутствии/невалидности — первый активный."""
+    own = db is None
+    db = db or get_db()
+    try:
+        pid = session.get('project_id')
+        row = None
+        if pid:
+            row = db.execute("SELECT * FROM project WHERE id=? AND is_deleted=0", (pid,)).fetchone()
+        if not row:
+            row = db.execute("SELECT * FROM project WHERE is_deleted=0 ORDER BY id LIMIT 1").fetchone()
+            session['project_id'] = row['id'] if row else None
+        return row
+    finally:
+        if own:
+            db.close()
+
+
+def current_project_id(db=None):
+    row = current_project_row(db)
+    return row['id'] if row else None
+
+
+def project_selector_html(db, current_id, next_url=None):
+    """Выпадающий список выбора текущего проекта (сохраняется в сессии)."""
+    projects = list_projects(db)
+    if not projects:
+        return '<span class="muted">Проектов пока нет</span>'
+    nxt = next_url or request.path
+    options = ''.join(
+        f'<option value="{p["id"]}" {"selected" if p["id"] == current_id else ""}>{html.escape(p["name"])}</option>'
+        for p in projects)
+    base = url_for('current_project_set', id=0)
+    onchange = ("location.href='" + base + "'.replace(/0$/, this.value)+'?next='+"
+                "encodeURIComponent('" + html.escape(nxt, quote=True) + "');")
+    return f'''<label style="margin-right:6px;">Текущий проект:</label>
+        <select name="project_id" onchange="{onchange}">{options}</select>'''
+
 def backup_db(path=None):
     """Создаёт резервную копию существующей (уже инициализированной) БД в data/backups/."""
     path = path or db_path_for(DEFAULT_DB_NAME)
@@ -435,6 +478,19 @@ def init_db(path=None):
             updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_deleted INTEGER DEFAULT 0
         );
+
+        -- Артефакты системного аналитика по проекту (документные, Markdown)
+        CREATE TABLE IF NOT EXISTS project_artifact (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id INTEGER NOT NULL REFERENCES project(id) ON DELETE CASCADE,
+            artifact_key TEXT NOT NULL,
+            content TEXT,
+            updated_by_user_id INTEGER REFERENCES app_user(id),
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            is_deleted INTEGER DEFAULT 0,
+            UNIQUE(project_id, artifact_key)
+        );
     ''')
     
     # Миграции для существующих БД (добавление новых колонок)
@@ -462,6 +518,13 @@ def init_db(path=None):
         db.execute("ALTER TABLE task_assignment ADD COLUMN assigned_by_user_id INTEGER REFERENCES app_user(id)")
     if 'assigned_at' not in acols:
         db.execute("ALTER TABLE task_assignment ADD COLUMN assigned_at DATETIME")
+    ucols = [r[1] for r in db.execute("PRAGMA table_info(app_user)").fetchall()]
+    if 'is_analyst' not in ucols:
+        db.execute("ALTER TABLE app_user ADD COLUMN is_analyst INTEGER NOT NULL DEFAULT 0")
+    pcols = [r[1] for r in db.execute("PRAGMA table_info(position_type)").fetchall()]
+    if 'is_analyst' not in pcols:
+        db.execute("ALTER TABLE position_type ADD COLUMN is_analyst INTEGER NOT NULL DEFAULT 0")
+        db.execute("UPDATE position_type SET is_analyst=1 WHERE lower(name)=lower('Системный аналитик')")
 
     # Типы задач: отдельное наполнение (для существующих БД, где основные справочники уже есть)
     for ttype in ('Новый функционал', 'Исправление ошибки', 'Улучшение',
@@ -519,6 +582,7 @@ def init_db(path=None):
             'Менеджер проекта', 'Дизайнер', 'Специалист по информационной безопасности'
         ]
         db.executemany("INSERT INTO position_type (name) VALUES (?)", [(p,) for p in position_types])
+        db.execute("UPDATE position_type SET is_analyst=1 WHERE lower(name)=lower('Системный аналитик')")
         
         emp_statuses = [
             ('Работает', 1), ('В командировке', 0), ('Болеет', 0),
@@ -775,7 +839,6 @@ ADMIN_WRITE_ENDPOINTS = {
     'project_create', 'project_edit', 'project_delete',
     'project_add_stakeholder', 'project_remove_stakeholder',
     'project_add_employee', 'project_remove_employee',
-    'requirement_create', 'requirement_edit', 'requirement_delete',
     'project_stage_create', 'project_stage_edit', 'project_stage_delete',
     'task_create', 'task_edit', 'task_delete',
     'task_assignment_edit', 'task_assignment_delete',
@@ -802,7 +865,13 @@ USER_WRITE_ENDPOINTS = {
     'my_tasks',
 }
 
-WRITE_ENDPOINTS = ADMIN_WRITE_ENDPOINTS | USER_WRITE_ENDPOINTS
+# Маршруты, доступные системному аналитику (и администратору)
+ANALYST_WRITE_ENDPOINTS = {
+    'requirement_create', 'requirement_edit', 'requirement_delete',
+    'artifact_edit', 'artifact_clear',
+}
+
+WRITE_ENDPOINTS = ADMIN_WRITE_ENDPOINTS | USER_WRITE_ENDPOINTS | ANALYST_WRITE_ENDPOINTS
 PUBLIC_ENDPOINTS = {'login', 'register', 'logout'}
 
 # GET-ссылки, изменяющие состояние (нужны для аудита, т.к. это не POST)
@@ -814,6 +883,7 @@ GET_MUTATION_ENDPOINTS = {
     'transcript_edit', 'transcript_segments_save', 'transcript_clear', 'transcript_segment_delete',
     'comment_delete', 'subtask_delete', 'task_assignment_delete', 'task_delete',
     'employee_delete', 'stakeholder_delete', 'project_delete', 'requirement_delete',
+    'artifact_clear',
     'project_stage_delete', 'event_delete', 'interview_delete', 'interview_qa_delete',
     'employee_status_delete', 'position_type_delete', 'priority_delete',
     'stakeholder_type_delete', 'requirement_type_delete', 'stage_type_delete',
@@ -858,6 +928,7 @@ def current_user():
                         'id': row['id'],
                         'login': row['login'],
                         'role': row['role'],
+                        'is_analyst': row['is_analyst'],
                         'employee_id': row['employee_id'],
                         'position_id': row['position_type_id'],
                         'position_name': row['position_name'],
@@ -871,6 +942,69 @@ def current_user():
 def is_admin():
     u = current_user()
     return bool(u and u['role'] == 'admin')
+
+
+def is_analyst():
+    u = current_user()
+    return bool(u and u.get('is_analyst'))
+
+
+def can_edit_artifacts():
+    """Документные артефакты и требования правят администратор и системный аналитик."""
+    return is_admin() or is_analyst()
+
+
+def role_label(role, is_analyst_flag=False):
+    labels = {'admin': 'администратор', 'user': 'пользователь'}
+    parts = [labels.get(role, role or '—')]
+    if is_analyst_flag:
+        parts.append('системный аналитик')
+    return ', '.join(parts)
+
+
+# ---------- Синхронизация должности и роли «Системный аналитик» ----------
+
+def _position_is_analyst(db, position_id):
+    if not position_id:
+        return False
+    row = db.execute("SELECT is_analyst FROM position_type WHERE id=?", (position_id,)).fetchone()
+    return bool(row and row['is_analyst'])
+
+
+def _analyst_position_id(db):
+    row = db.execute("SELECT id FROM position_type WHERE is_analyst=1 AND is_deleted=0 ORDER BY id LIMIT 1").fetchone()
+    return row['id'] if row else None
+
+
+def _default_position_id(db):
+    """Должность «Пользователь» (создаётся при отсутствии)."""
+    row = db.execute("SELECT id FROM position_type WHERE lower(name)=lower('Пользователь') AND is_deleted=0").fetchone()
+    if row:
+        return row['id']
+    return db.execute("INSERT INTO position_type (name) VALUES ('Пользователь')").lastrowid
+
+
+def sync_analyst_role_from_position(db, employee_id):
+    """Должность сотрудника → флаг роли is_analyst у связанной учётной записи."""
+    row = db.execute("SELECT position_type_id FROM employee WHERE id=? AND is_deleted=0", (employee_id,)).fetchone()
+    if not row:
+        return
+    want = 1 if _position_is_analyst(db, row['position_type_id']) else 0
+    db.execute("UPDATE app_user SET is_analyst=?, updated_at=CURRENT_TIMESTAMP WHERE employee_id=? AND is_deleted=0",
+               (want, employee_id))
+
+
+def sync_position_from_analyst_role(db, employee_id, want):
+    """Флаг роли is_analyst → должность сотрудника."""
+    if want:
+        pos_id = _analyst_position_id(db)
+        if pos_id:
+            db.execute("UPDATE employee SET position_type_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_deleted=0",
+                       (pos_id, employee_id))
+    else:
+        pos_id = _default_position_id(db)
+        db.execute("UPDATE employee SET position_type_id=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND is_deleted=0",
+                   (pos_id, employee_id))
 
 
 def _login_redirect():
@@ -1159,6 +1293,14 @@ def _auth_guard():
             return _login_redirect()
         _audit_request(user)
         return None
+    if endpoint in ANALYST_WRITE_ENDPOINTS:
+        if not user:
+            return _login_redirect()
+        _audit_request(user)
+        if not (is_admin() or is_analyst()):
+            flash('Недостаточно прав: требуется роль системного аналитика', 'error')
+            return redirect(url_for('index'))
+        return None
     if not user:
         return _login_redirect()
     _audit_request(user)
@@ -1212,6 +1354,8 @@ def _control_hidden(endpoint, user):
         return False
     if endpoint in ADMIN_WRITE_ENDPOINTS:
         return True
+    if endpoint in ANALYST_WRITE_ENDPOINTS:
+        return not (user and (user['role'] == 'admin' or user.get('is_analyst')))
     if not user and endpoint in USER_WRITE_ENDPOINTS:
         return True
     return False
@@ -1330,10 +1474,29 @@ BASE_TEMPLATE = '''
 <body>
     <div class="header">
         <h1>{{ title }}</h1>
-        <div style="margin-top:8px; font-size:13px; color:#bdc3c7;">Активная БД: <strong style="color:#ecf0f1;">{{ current_db }}</strong> &nbsp;|&nbsp; <a href="{{ url_for('database_index') }}" style="color:#ecf0f1;">управление БД</a></div>
+        <div style="margin-top:8px; font-size:13px; color:#bdc3c7;">Активная БД: <strong style="color:#ecf0f1;">{{ current_db }}</strong> &nbsp;|&nbsp; <a href="{{ url_for('database_index') }}" style="color:#ecf0f1;">управление БД</a>{% if current_project %} &nbsp;|&nbsp; Текущий проект: <a href="{{ url_for('project_detail', id=current_project.id) }}" style="color:#ecf0f1;">{{ current_project.name }}</a>{% endif %}</div>
     </div>
     <div class="nav">
         <a href="{{ url_for('index') }}">Главная</a>
+        <div class="dropdown">
+            <span class="dropbtn">Артефакты СА ▾</span>
+            <div class="dropdown-content">
+                <a href="{{ url_for('artifact_view', key='vision') }}">Видение (Vision)</a>
+                <a href="{{ url_for('artifact_view', key='glossary') }}">Глоссарий</a>
+                <a href="{{ url_for('artifact_view', key='stakeholders') }}">Заинтересованные лица</a>
+                <a href="{{ url_for('artifact_view', key='personas') }}">Персоны</a>
+                <a href="{{ url_for('artifact_view', key='user_stories') }}">Пользовательские истории</a>
+                <a href="{{ url_for('artifact_view', key='use_cases') }}">Варианты использования</a>
+                <a href="{{ url_for('artifact_view', key='functional_requirements') }}">Функциональные требования</a>
+                <a href="{{ url_for('artifact_view', key='nonfunctional_requirements') }}">Нефункциональные требования</a>
+                <a href="{{ url_for('artifact_view', key='bpmn') }}">Модель бизнес-процессов (BPMN)</a>
+                <a href="{{ url_for('artifact_view', key='state_machines') }}">Диаграммы состояний</a>
+                <a href="{{ url_for('artifact_view', key='data_model') }}">Модель данных (ER)</a>
+                <a href="{{ url_for('artifact_view', key='prototype') }}">Прототип и навигация</a>
+                <a href="{{ url_for('artifact_view', key='backlog') }}">Бэклог и критерии приёмки</a>
+                <a href="{{ url_for('artifact_view', key='risks') }}">Риски и допущения</a>
+            </div>
+        </div>
         <div class="dropdown">
             <span class="dropbtn">Справочники ▾</span>
             <div class="dropdown-content">
@@ -1377,7 +1540,7 @@ BASE_TEMPLATE = '''
         <a href="{{ url_for('chat_index') }}">Чат</a>
         <div class="nav-right">
             {% if current_user %}
-                <span>{% if current_user.position_name %}{{ current_user.position_name }} {% endif %}{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }})</span>
+                <span>{% if current_user.position_name %}{{ current_user.position_name }} {% endif %}{{ current_user.full_name }} ({{ 'администратор' if is_admin else 'пользователь' }}{% if is_analyst %}, системный аналитик{% endif %})</span>
                 <a class="logout-btn" href="{{ url_for('logout') }}">Выход</a>
             {% else %}
                 <a class="login-btn" href="{{ url_for('login') }}">Вход</a>
@@ -1414,6 +1577,23 @@ def _render_tables(tables):
         </div>'''
     return out
 
+_markdown_renderer = None
+
+
+def _render_markdown(text):
+    """Markdown → HTML (markdown-it-py, gfm-like, без сырого HTML). Фолбэк — экранированный текст."""
+    global _markdown_renderer
+    if _markdown_renderer is None:
+        try:
+            from markdown_it import MarkdownIt
+            _markdown_renderer = MarkdownIt('gfm-like', {'html': False, 'linkify': False})
+        except Exception:
+            _markdown_renderer = False
+    if _markdown_renderer:
+        return _markdown_renderer.render(text or '')
+    return f'<div style="white-space: pre-wrap;">{html.escape(text or "")}</div>'
+
+
 def _report_page(title, cards, tables):
     card_html = ''.join([
         f'<div class="stat-card"><h3>{html.escape(str(label))}</h3>'
@@ -1443,5 +1623,317 @@ def _detail_page(title, info, tables=None, actions=None):
     {tables_html}
     '''
     return render_template_string(BASE_TEMPLATE, title=title, content=content)
+
+
+# ==================== ОБЩИЕ БЛОКИ КАРТОЧКИ ПРОЕКТА / АРТЕФАКТОВ ====================
+
+def _project_requirements_html(db, project_id, type_name=None, next_url=None, preset_type_id=None):
+    """Таблица требований проекта (общая для вкладки проекта и артефактов №7/№8)."""
+    params = [project_id]
+    type_filter = ''
+    if type_name:
+        type_filter = ' AND rt.name=?'
+        params.append(type_name)
+    requirements = db.execute(f"""
+        SELECT r.*, s.last_name, s.first_name, rt.name as type_name, pr.name as priority_name
+        FROM requirement r
+        LEFT JOIN stakeholder s ON r.stakeholder_id = s.id
+        JOIN requirement_type rt ON r.requirement_type_id = rt.id
+        JOIN priority pr ON r.priority_id = pr.id
+        WHERE r.project_id=? AND r.is_deleted=0{type_filter}
+        ORDER BY r.id DESC
+    """, tuple(params)).fetchall()
+
+    def with_next(endpoint, **kw):
+        if next_url:
+            kw['next'] = next_url
+        return url_for(endpoint, **kw)
+
+    rows = ''.join([f'''
+        <tr>
+            <td>{r['id']}</td>
+            <td>{r['type_name']}</td>
+            <td>{f'<a href="{url_for("stakeholder_detail", id=r["stakeholder_id"])}">{r["last_name"] or ""} {r["first_name"] or ""}</a>' if r['stakeholder_id'] else '-'}</td>
+            <td>{r['description'][:80]}</td>
+            <td>{r['priority_name']}</td>
+            <td>
+                <a href="{with_next('requirement_detail', id=r['id'])}" class="btn btn-success">Открыть</a>
+                <a href="{with_next('requirement_edit', id=r['id'])}" class="btn btn-primary">Изменить</a>
+                <a href="{with_next('requirement_delete', id=r['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
+            </td>
+        </tr>''' for r in requirements])
+
+    create_kwargs = {'project_id': project_id}
+    if preset_type_id:
+        create_kwargs['requirement_type_id'] = preset_type_id
+    if next_url:
+        create_kwargs['next'] = next_url
+    add_link = url_for('requirement_create', **create_kwargs)
+
+    html_out = f'''
+        <a href="{add_link}" class="btn btn-success">+ Добавить требование</a>
+        <table>
+            <thead>
+                <tr><th>ID</th><th>Тип</th><th>Стейкхолдер</th><th>Описание</th><th>Приоритет</th><th>Действия</th></tr>
+            </thead>
+            <tbody>{rows}</tbody>
+        </table>'''
+    return html_out, len(requirements)
+
+
+def _project_stakeholders_html(db, project_id):
+    """Вкладка «Стейкхолдеры» проекта (общая для карточки проекта и артефакта)."""
+    project = db.execute("SELECT id, main_stakeholder_id FROM project WHERE id=?", (project_id,)).fetchone()
+    main_id = project['main_stakeholder_id'] if project else None
+    assoc_rows = db.execute("SELECT stakeholder_id FROM project_stakeholder WHERE project_id=? AND is_deleted=0", (project_id,)).fetchall()
+    assoc_ids = {a['stakeholder_id'] for a in assoc_rows}
+    req_st_ids = {row[0] for row in db.execute("SELECT DISTINCT stakeholder_id FROM requirement WHERE project_id=? AND stakeholder_id IS NOT NULL AND is_deleted=0", (project_id,))}
+    stk_ids = set(assoc_ids)
+    if main_id:
+        stk_ids.add(main_id)
+    stk_ids |= req_st_ids
+    project_stakeholders = []
+    if stk_ids:
+        ph = ','.join('?' * len(stk_ids))
+        project_stakeholders = db.execute(f"""
+            SELECT s.*, st.name type_name, st.influence_priority inf, st.interest_priority ints,
+                   (SELECT COUNT(*) FROM requirement r WHERE r.stakeholder_id=s.id AND r.project_id=? AND r.is_deleted=0) req_count
+            FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id
+            WHERE s.is_deleted=0 AND s.id IN ({ph})
+            ORDER BY s.last_name
+        """, tuple([project_id] + list(stk_ids))).fetchall()
+
+    def stk_quadrant(inf, ints):
+        if inf >= 4 and ints >= 4:
+            return 'Ключевые игроки'
+        if inf >= 4:
+            return 'Удовлетворять'
+        if ints >= 4:
+            return 'Держать в курсе'
+        return 'Наблюдать'
+
+    def remove_btn(sid):
+        if sid in assoc_ids and sid != main_id:
+            return f' <a href="{url_for("project_remove_stakeholder", id=project_id, stakeholder_id=sid)}" class="btn btn-danger" onclick="return confirm(\'Убрать?\')">Убрать</a>'
+        return ''
+
+    stk_rows = ''.join([f'''
+        <tr>
+            <td class="name-cell"><a href="{url_for('stakeholder_detail', id=s['id'])}">{s['last_name']} {s['first_name']}</a> {f'<span class="badge" style="background:#e74c3c">главный</span>' if s['id'] == main_id else ''}{f' <span class="badge" style="background:#3498db">добавлен</span>' if s['id'] in assoc_ids and s['id'] != main_id else ''}</td>
+            <td>{s['type_name']}</td>
+            <td>{s['inf']}/5, {s['ints']}/5</td>
+            <td>{stk_quadrant(s['inf'], s['ints'])}</td>
+            <td>{s['position'] or '-'}</td>
+            <td>{s['req_count']}</td>
+            <td><a href="{url_for('stakeholder_detail', id=s['id'])}" class="btn btn-success">Открыть</a> <a href="{url_for('stakeholder_edit', id=s['id'], origin=project_id)}" class="btn btn-primary">Изменить</a>{remove_btn(s['id'])}</td>
+        </tr>''' for s in project_stakeholders])
+
+    if stk_ids:
+        cph = ','.join('?' * len(stk_ids))
+        candidate_rows = db.execute(f"""
+            SELECT s.*, st.name type_name FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id
+            WHERE s.is_deleted=0 AND s.id NOT IN ({cph})
+            ORDER BY s.last_name
+        """, tuple(list(stk_ids))).fetchall()
+    else:
+        candidate_rows = db.execute("SELECT s.*, st.name type_name FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id WHERE s.is_deleted=0 ORDER BY s.last_name").fetchall()
+    candidate_options = ''.join(f'<option value="{s["id"]}">{s["last_name"]} {s["first_name"]} — {s["type_name"]}</option>' for s in candidate_rows)
+
+    html_out = f'''
+            <a href="{url_for('stakeholder_create', project_id=project_id)}" class="btn btn-success">+ Добавить стейкхолдера</a>
+            <form method="POST" action="{url_for('project_add_stakeholder', id=project_id)}" style="display:inline-flex; gap:6px; margin-left:8px; vertical-align:middle;">
+                <select name="stakeholder_id" required>
+                    <option value="">— выберите из имеющихся —</option>
+                    {candidate_options}
+                </select>
+                <button type="submit" class="btn btn-primary">Добавить</button>
+            </form>
+            <table>
+                <thead>
+                    <tr><th>Стейкхолдер</th><th>Тип</th><th>Влияние/Интерес</th><th>Квадрант</th><th>Должность</th><th>Требований</th><th>Действия</th></tr>
+                </thead>
+                <tbody>{stk_rows}</tbody>
+            </table>'''
+    return html_out, len(project_stakeholders)
+
+
+def _project_stage_tree_html(db, project_id):
+    """Дерево этапы → задачи → подзадачи проекта (общая для вкладки проекта и артефакта)."""
+    stages = db.execute("""
+        SELECT ps.*, pst.name as type_name, pss.name as status_name, pss.color
+        FROM project_stage ps
+        JOIN project_stage_type pst ON ps.stage_type_id = pst.id
+        JOIN project_stage_status pss ON ps.status_id = pss.id
+        WHERE ps.project_id=? AND ps.is_deleted=0
+        ORDER BY pst.sort_order
+    """, (project_id,)).fetchall()
+
+    tasks = db.execute("""
+        SELECT t.*, ps.id as stage_id, pr.name as priority_name,
+               ts.name as status_name, ts.color as status_color, tt.name as type_name
+        FROM task t
+        JOIN priority pr ON t.priority_id = pr.id
+        JOIN task_status ts ON t.status_id = ts.id
+        LEFT JOIN project_stage ps ON t.stage_id = ps.id
+        LEFT JOIN requirement r ON t.requirement_id = r.id
+        LEFT JOIN task_type tt ON t.task_type_id = tt.id
+        WHERE t.is_deleted=0 AND (ps.project_id=? OR r.project_id=?)
+        ORDER BY t.id
+    """, (project_id, project_id)).fetchall()
+
+    task_ids = [t['id'] for t in tasks]
+    subtasks = []
+    if task_ids:
+        ph = ','.join('?' * len(task_ids))
+        subtasks = db.execute(f"""
+            SELECT st.*, pr.name as priority_name, ts.name as status_name, ts.color as status_color
+            FROM subtask st
+            JOIN priority pr ON st.priority_id = pr.id
+            JOIN task_status ts ON st.status_id = ts.id
+            WHERE st.is_deleted=0 AND st.parent_task_id IN ({ph})
+            ORDER BY st.id
+        """, tuple(task_ids)).fetchall()
+    sub_children = {}
+    top_by_task = {}
+    for st in subtasks:
+        sub_children.setdefault(st['parent_subtask_id'], []).append(st)
+        if st['parent_subtask_id'] is None:
+            top_by_task.setdefault(st['parent_task_id'], []).append(st)
+
+    assignments = {}
+    def collect_assignments(kind, ids):
+        if not ids:
+            return
+        ph = ','.join('?' * len(ids))
+        rows = db.execute(f"""
+            SELECT ta.*, e.id as eid, e.last_name, e.first_name,
+                   COALESCE(TRIM(au.last_name || ' ' || au.first_name), ap.login, '—') as assigner
+            FROM task_assignment ta JOIN employee e ON ta.employee_id = e.id
+            LEFT JOIN app_user ap ON ta.assigned_by_user_id = ap.id
+            LEFT JOIN employee au ON ap.employee_id = au.id
+            WHERE ta.is_deleted=0 AND ta.task_kind=? AND ta.task_id IN ({ph})
+        """, tuple([kind] + list(ids))).fetchall()
+        for a in rows:
+            assignments.setdefault((kind, a['task_id']), []).append(a)
+    collect_assignments('task', task_ids)
+    collect_assignments('subtask', [s['id'] for s in subtasks])
+
+    covered_by_emp = {}
+    for (k, eidkey), rows in assignments.items():
+        for a in rows:
+            emp = a['employee_id']
+            if emp not in covered_by_emp:
+                covered_by_emp[emp] = _covered_for_employee(db, emp)
+    def _not_covered(k, tid, emp):
+        return (k, tid) not in covered_by_emp.get(emp, set())
+    assignments = {(k, tid): [a for a in rows if _not_covered(k, tid, a['employee_id'])]
+                   for (k, tid), rows in assignments.items()}
+
+    def render_assignees(lines):
+        if not lines:
+            return '<span class="muted">исполнители не назначены</span>'
+        items = [f'<a href="{url_for("employee_detail", id=a["eid"])}">{html.escape(a["last_name"])} {html.escape(a["first_name"])}</a> ({int(a["share"] * 100)}%, назначил: {html.escape(a["assigner"] or "—")})' for a in lines]
+        return 'Исполнители: ' + ', '.join(items)
+
+    def render_assignments_block(kind, tid):
+        return f'<div class="assign">{render_assignees(assignments.get((kind, tid), []))}</div>'
+
+    def render_subtask(st):
+        children = sub_children.get(st['id'], [])
+        asg = url_for('task_assignment_create', task_id=st['id'], task_kind='subtask', origin=project_id)
+        edit_link = url_for('subtask_edit', id=st['id'], origin=project_id)
+        card_link = url_for('subtask_detail', id=st['id'])
+        child_link = url_for('subtask_create', parent_subtask_id=st['id'], origin=project_id)
+        del_link = url_for('subtask_delete', id=st['id'])
+        overdue = bool(st['deadline']) and str(st['deadline']) < date.today().isoformat() and st['status_name'] not in ('Выполнена', 'Отменена')
+        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
+        return f'''
+            <details class="subtask" open>
+                <summary>
+                    <span class="node-info">
+                        <a href="{card_link}">Подзадача #{st['id']}</a>
+                        <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
+                        <span class="node-meta">Приоритет: {st['priority_name']}</span>
+                        <span class="node-meta" style="{deadline_style}">Срок: {st['deadline'] or '-'}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-warning" href="{asg}">Назначить</a>
+                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
+                        <a class="btn btn-success" href="{child_link}">+ Подзадача</a>
+                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
+                </summary>
+                <div class="node-body">
+                    {render_assignments_block('subtask', st['id'])}
+                    {''.join([render_subtask(c) for c in children])}
+                </div>
+            </details>'''
+
+    def render_task(t):
+        task_subtasks = top_by_task.get(t['id'], [])
+        subtask_html = ''.join([render_subtask(s) for s in task_subtasks])
+        asg = url_for('task_assignment_create', task_id=t['id'], task_kind='task', origin=project_id)
+        subtask_link = url_for('subtask_create', parent_task_id=t['id'], origin=project_id)
+        edit_link = url_for('task_edit', id=t['id'], origin=project_id)
+        card_link = url_for('task_detail', id=t['id'])
+        del_link = url_for('task_delete', id=t['id'])
+        overdue = bool(t['deadline']) and str(t['deadline']) < date.today().isoformat() and t['status_name'] not in ('Выполнена', 'Отменена')
+        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
+        return f'''
+            <details class="task" open>
+                <summary>
+                    <span class="node-info">
+                        <a href="{card_link}">Задача #{t['id']}</a>
+                        <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
+                        <span class="node-meta">Тип: {t['type_name'] or '-'}</span>
+                        <span class="node-meta">Приоритет: {t['priority_name']}</span>
+                        <span class="node-meta" style="{deadline_style}">Срок: {t['deadline'] or '-'}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-warning" href="{asg}">Назначить</a>
+                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
+                        <a class="btn btn-success" href="{subtask_link}">+ Подзадача</a>
+                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
+                </summary>
+                <div class="node-body">
+                    {render_assignments_block('task', t['id'])}
+                    {subtask_html}
+                </div>
+            </details>'''
+
+    tasks_by_stage = {}
+    for t in tasks:
+        if t['stage_id'] is None:
+            tasks_by_stage.setdefault(None, []).append(t)
+        else:
+            tasks_by_stage.setdefault(t['stage_id'], []).append(t)
+
+    stage_html = ''
+    for s in stages:
+        stage_tasks = tasks_by_stage.get(s['id'], [])
+        inner = ''.join([render_task(t) for t in stage_tasks])
+        if not stage_tasks:
+            inner = '<div class="node-body muted">Задач по этапу нет</div>'
+        stage_html += f'''
+            <details class="stage" open>
+                <summary>
+                    <span class="node-info">
+                        {s['type_name']}
+                        <span class="badge" style="background: {s['color'] or '#95a5a6'}">{s['status_name']}</span>
+                        <span class="node-meta">План. окончание: {s['planned_end'] or '-'}</span>
+                    </span>
+                    <span class="node-actions">
+                        <a class="btn btn-success" href="{url_for('task_create', stage_id=s['id'], origin=project_id)}">+ Задача</a>
+                        <a class="btn btn-danger" href="{url_for('project_stage_delete', id=s['id'])}" onclick="return confirm('Удалить?')">Удалить</a>
+                    </span>
+                </summary>
+                <div class="node-body">{inner}</div>
+            </details>'''
+
+    html_out = f'''
+            <a href="{url_for('project_stage_create')}" class="btn btn-success">+ Добавить этап</a>
+            <div class="tree">{stage_html}</div>'''
+    return html_out, len(stages)
 
 

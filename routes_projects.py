@@ -19,6 +19,9 @@ from app_core import (  # noqa: F401
     _entity_project_id,
     _last_comment,
     _project_employee_options,
+    _project_requirements_html,
+    _project_stage_tree_html,
+    _project_stakeholders_html,
     _projected_load_after,
     _render_tables,
     _report_page,
@@ -253,254 +256,9 @@ def project_detail(id):
         flash('Проект не найден', 'error')
         return redirect(url_for('projects_list'))
 
-    requirements = db.execute("""
-        SELECT r.*, s.last_name, s.first_name, rt.name as type_name, pr.name as priority_name
-        FROM requirement r
-        LEFT JOIN stakeholder s ON r.stakeholder_id = s.id
-        JOIN requirement_type rt ON r.requirement_type_id = rt.id
-        JOIN priority pr ON r.priority_id = pr.id
-        WHERE r.project_id=? AND r.is_deleted=0
-        ORDER BY r.id DESC
-    """, (id,)).fetchall()
-
-    stages = db.execute("""
-        SELECT ps.*, pst.name as type_name, pss.name as status_name, pss.color
-        FROM project_stage ps
-        JOIN project_stage_type pst ON ps.stage_type_id = pst.id
-        JOIN project_stage_status pss ON ps.status_id = pss.id
-        WHERE ps.project_id=? AND ps.is_deleted=0
-        ORDER BY pst.sort_order
-    """, (id,)).fetchall()
-
-    tasks = db.execute("""
-        SELECT t.*, ps.id as stage_id, pr.name as priority_name,
-               ts.name as status_name, ts.color as status_color, tt.name as type_name
-        FROM task t
-        JOIN priority pr ON t.priority_id = pr.id
-        JOIN task_status ts ON t.status_id = ts.id
-        LEFT JOIN project_stage ps ON t.stage_id = ps.id
-        LEFT JOIN requirement r ON t.requirement_id = r.id
-        LEFT JOIN task_type tt ON t.task_type_id = tt.id
-        WHERE t.is_deleted=0 AND (ps.project_id=? OR r.project_id=?)
-        ORDER BY t.id
-    """, (id, id)).fetchall()
-
-    task_ids = [t['id'] for t in tasks]
-    subtasks = []
-    if task_ids:
-        ph = ','.join('?' * len(task_ids))
-        subtasks = db.execute(f"""
-            SELECT st.*, pr.name as priority_name, ts.name as status_name, ts.color as status_color
-            FROM subtask st
-            JOIN priority pr ON st.priority_id = pr.id
-            JOIN task_status ts ON st.status_id = ts.id
-            WHERE st.is_deleted=0 AND st.parent_task_id IN ({ph})
-            ORDER BY st.id
-        """, tuple(task_ids)).fetchall()
-    sub_children = {}
-    top_by_task = {}
-    for st in subtasks:
-        sub_children.setdefault(st['parent_subtask_id'], []).append(st)
-        if st['parent_subtask_id'] is None:
-            top_by_task.setdefault(st['parent_task_id'], []).append(st)
-
-    assignments = {}
-    def collect_assignments(kind, ids):
-        if not ids:
-            return
-        ph = ','.join('?' * len(ids))
-        rows = db.execute(f"""
-            SELECT ta.*, e.id as eid, e.last_name, e.first_name,
-                   COALESCE(TRIM(au.last_name || ' ' || au.first_name), ap.login, '—') as assigner
-            FROM task_assignment ta JOIN employee e ON ta.employee_id = e.id
-            LEFT JOIN app_user ap ON ta.assigned_by_user_id = ap.id
-            LEFT JOIN employee au ON ap.employee_id = au.id
-            WHERE ta.is_deleted=0 AND ta.task_kind=? AND ta.task_id IN ({ph})
-        """, tuple([kind] + list(ids))).fetchall()
-        for a in rows:
-            assignments.setdefault((kind, a['task_id']), []).append(a)
-    collect_assignments('task', task_ids)
-    collect_assignments('subtask', [s['id'] for s in subtasks])
-
-    # Сотрудник, занятый в подзадаче, не показывается как исполнитель родительской задачи/подзадачи
-    covered_by_emp = {}
-    for (k, eidkey), rows in assignments.items():
-        for a in rows:
-            emp = a['employee_id']
-            if emp not in covered_by_emp:
-                covered_by_emp[emp] = _covered_for_employee(db, emp)
-    def _not_covered(k, tid, emp):
-        return (k, tid) not in covered_by_emp.get(emp, set())
-    assignments = {(k, tid): [a for a in rows if _not_covered(k, tid, a['employee_id'])]
-                   for (k, tid), rows in assignments.items()}
-
-    def render_assignees(lines):
-        if not lines:
-            return '<span class="muted">исполнители не назначены</span>'
-        items = [f'<a href="{url_for("employee_detail", id=a["eid"])}">{html.escape(a["last_name"])} {html.escape(a["first_name"])}</a> ({int(a["share"] * 100)}%, назначил: {html.escape(a["assigner"] or "—")})' for a in lines]
-        return 'Исполнители: ' + ', '.join(items)
-
-    def render_assignments_block(kind, tid):
-        return f'<div class="assign">{render_assignees(assignments.get((kind, tid), []))}</div>'
-
-    def render_subtask(st):
-        children = sub_children.get(st['id'], [])
-        asg = url_for('task_assignment_create', task_id=st['id'], task_kind='subtask', origin=id)
-        edit_link = url_for('subtask_edit', id=st['id'], origin=id)
-        card_link = url_for('subtask_detail', id=st['id'])
-        child_link = url_for('subtask_create', parent_subtask_id=st['id'], origin=id)
-        del_link = url_for('subtask_delete', id=st['id'])
-        overdue = bool(st['deadline']) and str(st['deadline']) < date.today().isoformat() and st['status_name'] not in ('Выполнена', 'Отменена')
-        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
-        return f'''
-            <details class="subtask" open>
-                <summary>
-                    <span class="node-info">
-                        <a href="{card_link}">Подзадача #{st['id']}</a>
-                        <span class="badge" style="background: {st['status_color'] or '#95a5a6'}">{st['status_name']}</span>
-                        <span class="node-meta">Приоритет: {st['priority_name']}</span>
-                        <span class="node-meta" style="{deadline_style}">Срок: {st['deadline'] or '-'}</span>
-                    </span>
-                    <span class="node-actions">
-                        <a class="btn btn-warning" href="{asg}">Назначить</a>
-                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
-                        <a class="btn btn-success" href="{child_link}">+ Подзадача</a>
-                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
-                    </span>
-                </summary>
-                <div class="node-body">
-                    {render_assignments_block('subtask', st['id'])}
-                    {''.join([render_subtask(c) for c in children])}
-                </div>
-            </details>'''
-
-    def render_task(t):
-        task_subtasks = top_by_task.get(t['id'], [])
-        subtask_html = ''.join([render_subtask(s) for s in task_subtasks])
-        asg = url_for('task_assignment_create', task_id=t['id'], task_kind='task', origin=id)
-        subtask_link = url_for('subtask_create', parent_task_id=t['id'], origin=id)
-        edit_link = url_for('task_edit', id=t['id'], origin=id)
-        card_link = url_for('task_detail', id=t['id'])
-        del_link = url_for('task_delete', id=t['id'])
-        overdue = bool(t['deadline']) and str(t['deadline']) < date.today().isoformat() and t['status_name'] not in ('Выполнена', 'Отменена')
-        deadline_style = ' color:#e74c3c; font-weight:bold;' if overdue else ''
-        return f'''
-            <details class="task" open>
-                <summary>
-                    <span class="node-info">
-                        <a href="{card_link}">Задача #{t['id']}</a>
-                        <span class="badge" style="background: {t['status_color'] or '#95a5a6'}">{t['status_name']}</span>
-                        <span class="node-meta">Тип: {t['type_name'] or '-'}</span>
-                        <span class="node-meta">Приоритет: {t['priority_name']}</span>
-                        <span class="node-meta" style="{deadline_style}">Срок: {t['deadline'] or '-'}</span>
-                    </span>
-                    <span class="node-actions">
-                        <a class="btn btn-warning" href="{asg}">Назначить</a>
-                        <a class="btn btn-primary" href="{edit_link}">Изменить</a>
-                        <a class="btn btn-success" href="{subtask_link}">+ Подзадача</a>
-                        <a class="btn btn-danger" href="{del_link}" onclick="return confirm('Удалить?')">Удалить</a>
-                    </span>
-                </summary>
-                <div class="node-body">
-                    {render_assignments_block('task', t['id'])}
-                    {subtask_html}
-                </div>
-            </details>'''
-
-    tasks_by_stage = {}
-    no_stage = []
-    for t in tasks:
-        if t['stage_id'] is None:
-            no_stage.append(t)
-        else:
-            tasks_by_stage.setdefault(t['stage_id'], []).append(t)
-
-    stage_html = ''
-    for s in stages:
-        stage_tasks = tasks_by_stage.get(s['id'], [])
-        inner = ''.join([render_task(t) for t in stage_tasks])
-        if not stage_tasks:
-            inner = '<div class="node-body muted">Задач по этапу нет</div>'
-        stage_html += f'''
-            <details class="stage" open>
-                <summary>
-                    <span class="node-info">
-                        {s['type_name']}
-                        <span class="badge" style="background: {s['color'] or '#95a5a6'}">{s['status_name']}</span>
-                        <span class="node-meta">План. окончание: {s['planned_end'] or '-'}</span>
-                    </span>
-                    <span class="node-actions">
-                        <a class="btn btn-success" href="{url_for('task_create', stage_id=s['id'], origin=id)}">+ Задача</a>
-                        <a class="btn btn-danger" href="{url_for('project_stage_delete', id=s['id'])}" onclick="return confirm('Удалить?')">Удалить</a>
-                    </span>
-                </summary>
-                <div class="node-body">{inner}</div>
-            </details>'''
-    req_rows = ''.join([f'''
-        <tr>
-            <td>{r['id']}</td>
-            <td>{r['type_name']}</td>
-            <td>{r['last_name'] or '-'} {r['first_name'] or ''}</td>
-            <td>{r['description'][:80]}</td>
-            <td>{r['priority_name']}</td>
-            <td>
-                <a href="{url_for('requirement_detail', id=r['id'])}" class="btn btn-success">Открыть</a>
-                <a href="{url_for('requirement_edit', id=r['id'])}" class="btn btn-primary">Изменить</a>
-                <a href="{url_for('requirement_delete', id=r['id'])}" class="btn btn-danger" onclick="return confirm('Удалить?')">Удалить</a>
-            </td>
-        </tr>''' for r in requirements])
-
-    main_id = project['main_stakeholder_id']
-    assoc_rows = db.execute("SELECT stakeholder_id FROM project_stakeholder WHERE project_id=? AND is_deleted=0", (id,)).fetchall()
-    assoc_ids = {a['stakeholder_id'] for a in assoc_rows}
-    req_st_ids = {row[0] for row in db.execute("SELECT DISTINCT stakeholder_id FROM requirement WHERE project_id=? AND stakeholder_id IS NOT NULL AND is_deleted=0", (id,))}
-    stk_ids = set(assoc_ids)
-    if main_id:
-        stk_ids.add(main_id)
-    stk_ids |= req_st_ids
-    project_stakeholders = []
-    if stk_ids:
-        ph = ','.join('?' * len(stk_ids))
-        project_stakeholders = db.execute(f"""
-            SELECT s.*, st.name type_name, st.influence_priority inf, st.interest_priority ints,
-                   (SELECT COUNT(*) FROM requirement r WHERE r.stakeholder_id=s.id AND r.project_id=? AND r.is_deleted=0) req_count
-            FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id
-            WHERE s.is_deleted=0 AND s.id IN ({ph})
-            ORDER BY s.last_name
-        """, tuple([id] + list(stk_ids))).fetchall()
-    def stk_quadrant(inf, ints):
-        if inf >= 4 and ints >= 4:
-            return 'Ключевые игроки'
-        if inf >= 4:
-            return 'Удовлетворять'
-        if ints >= 4:
-            return 'Держать в курсе'
-        return 'Наблюдать'
-    def remove_btn(sid):
-        if sid in assoc_ids and sid != main_id:
-            return f' <a href="{url_for("project_remove_stakeholder", id=id, stakeholder_id=sid)}" class="btn btn-danger" onclick="return confirm(\'Убрать?\')">Убрать</a>'
-        return ''
-    stk_rows = ''.join([f'''
-        <tr>
-            <td class="name-cell"><a href="{url_for('stakeholder_detail', id=s['id'])}">{s['last_name']} {s['first_name']}</a> {f'<span class="badge" style="background:#e74c3c">главный</span>' if s['id'] == main_id else ''}{f' <span class="badge" style="background:#3498db">добавлен</span>' if s['id'] in assoc_ids and s['id'] != main_id else ''}</td>
-            <td>{s['type_name']}</td>
-            <td>{s['inf']}/5, {s['ints']}/5</td>
-            <td>{stk_quadrant(s['inf'], s['ints'])}</td>
-            <td>{s['position'] or '-'}</td>
-            <td>{s['req_count']}</td>
-            <td><a href="{url_for('stakeholder_detail', id=s['id'])}" class="btn btn-success">Открыть</a> <a href="{url_for('stakeholder_edit', id=s['id'], origin=id)}" class="btn btn-primary">Изменить</a>{remove_btn(s['id'])}</td>
-        </tr>''' for s in project_stakeholders])
-    candidate_rows = []
-    if stk_ids:
-        cph = ','.join('?' * len(stk_ids))
-        candidate_rows = db.execute(f"""
-            SELECT s.*, st.name type_name FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id
-            WHERE s.is_deleted=0 AND s.id NOT IN ({cph})
-            ORDER BY s.last_name
-        """, tuple(list(stk_ids))).fetchall()
-    else:
-        candidate_rows = db.execute("SELECT s.*, st.name type_name FROM stakeholder s JOIN stakeholder_type st ON s.type_id=st.id WHERE s.is_deleted=0 ORDER BY s.last_name").fetchall()
-    candidate_options = ''.join(f'<option value="{s["id"]}">{s["last_name"]} {s["first_name"]} — {s["type_name"]}</option>' for s in candidate_rows)
+    req_block, req_count = _project_requirements_html(db, id)
+    stages_block, stages_count = _project_stage_tree_html(db, id)
+    stk_block, stk_count = _project_stakeholders_html(db, id)
 
     emp_rows = db.execute("""
         SELECT e.*, pe.project_id, pt.name position_name, es.name status_name, es.is_available
@@ -536,6 +294,7 @@ def project_detail(id):
         emp_candidates = db.execute("SELECT e.*, pt.name position_name FROM employee e JOIN position_type pt ON e.position_type_id=pt.id WHERE e.is_deleted=0 ORDER BY e.last_name").fetchall()
     emp_candidate_options = ''.join(f'<option value="{e["id"]}">{e["last_name"]} {e["first_name"]} — {e["position_name"]}</option>' for e in emp_candidates)
 
+    session['project_id'] = id
     active_tab = request.args.get('tab') or 'req'
     if active_tab not in ('req', 'stages', 'stk', 'emp'):
         active_tab = 'req'
@@ -553,39 +312,19 @@ def project_detail(id):
             </span>
         </h2>
         <div class="tabs">
-            <button class="{btn_d['req']}" id="btn-req" onclick="showTab('req')">Требования ({len(requirements)})</button>
-            <button class="{btn_d['stages']}" id="btn-stages" onclick="showTab('stages')">Этапы ({len(stages)})</button>
-            <button class="{btn_d['stk']}" id="btn-stk" onclick="showTab('stk')">Стейкхолдеры ({len(project_stakeholders)})</button>
+            <button class="{btn_d['req']}" id="btn-req" onclick="showTab('req')">Требования ({req_count})</button>
+            <button class="{btn_d['stages']}" id="btn-stages" onclick="showTab('stages')">Этапы ({stages_count})</button>
+            <button class="{btn_d['stk']}" id="btn-stk" onclick="showTab('stk')">Стейкхолдеры ({stk_count})</button>
             <button class="{btn_d['emp']}" id="btn-emp" onclick="showTab('emp')">Исполнители ({len(emp_rows)})</button>
         </div>
         <div class="{panel_d['req']}" id="tab-req">
-            <a href="{url_for('requirement_create', project_id=id)}" class="btn btn-success">+ Добавить требование</a>
-            <table>
-                <thead>
-                    <tr><th>ID</th><th>Тип</th><th>Стейкхолдер</th><th>Описание</th><th>Приоритет</th><th>Действия</th></tr>
-                </thead>
-                <tbody>{req_rows}</tbody>
-            </table>
+            {req_block}
         </div>
         <div class="{panel_d['stages']}" id="tab-stages">
-            <a href="{url_for('project_stage_create')}" class="btn btn-success">+ Добавить этап</a>
-            <div class="tree">{stage_html}</div>
+            {stages_block}
         </div>
         <div class="{panel_d['stk']}" id="tab-stk">
-            <a href="{url_for('stakeholder_create', project_id=id)}" class="btn btn-success">+ Добавить стейкхолдера</a>
-            <form method="POST" action="{url_for('project_add_stakeholder', id=id)}" style="display:inline-flex; gap:6px; margin-left:8px; vertical-align:middle;">
-                <select name="stakeholder_id" required>
-                    <option value="">— выберите из имеющихся —</option>
-                    {candidate_options}
-                </select>
-                <button type="submit" class="btn btn-primary">Добавить</button>
-            </form>
-            <table>
-                <thead>
-                    <tr><th>Стейкхолдер</th><th>Тип</th><th>Влияние/Интерес</th><th>Квадрант</th><th>Должность</th><th>Требований</th><th>Действия</th></tr>
-                </thead>
-                <tbody>{stk_rows}</tbody>
-            </table>
+            {stk_block}
         </div>
         <div class="{panel_d['emp']}" id="tab-emp">
             <a href="{url_for('employee_create', project_id=id)}" class="btn btn-success">+ Добавить исполнителя</a>

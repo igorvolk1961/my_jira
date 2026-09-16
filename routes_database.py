@@ -28,8 +28,10 @@ from app_core import (  # noqa: F401
     app,
     backup_db,
     current_db_name,
+    current_project_row,
     current_user,
     is_admin,
+    is_analyst,
     date,
     datetime,
     db_path_for,
@@ -58,7 +60,18 @@ from app_core import (  # noqa: F401
 
 @app.context_processor
 def _inject_current_db():
-    return {'current_db': current_db_name(), 'current_user': current_user(), 'is_admin': is_admin()}
+    db = get_db()
+    try:
+        project = current_project_row(db)
+    finally:
+        db.close()
+    return {
+        'current_db': current_db_name(),
+        'current_user': current_user(),
+        'is_admin': is_admin(),
+        'is_analyst': is_analyst(),
+        'current_project': project,
+    }
 
 def _sanitize_db_name(name):
     name = (name or '').strip()

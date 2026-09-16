@@ -28,6 +28,8 @@ from app_core import (  # noqa: F401
     app,
     backup_db,
     current_db_name,
+    current_project_row,
+    project_selector_html,
     date,
     datetime,
     db_path_for,
@@ -76,7 +78,13 @@ def index():
         """).fetchone()[0]
     }
     
+    project = current_project_row(db)
+    selector = project_selector_html(db, project['id'] if project else None, next_url=url_for('index'))
+
     content = f'''
+    <div class="card" style="padding:14px 20px;">
+        {selector}
+    </div>
     <div class="stats">
         <div class="stat-card">
             <h3>Всего проектов</h3>
