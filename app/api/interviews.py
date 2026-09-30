@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
 
-from app.dependencies import current_user, get_db, require_admin
+from app.dependencies import current_user, get_db, require_analyst_or_admin
 from app.flash import flash
 from app.presentation import interview_views
 from app.presentation.render import render
@@ -30,9 +30,9 @@ def _redirect(url: str) -> RedirectResponse:
     return RedirectResponse(url, status_code=302)
 
 
-def _is_admin(request: Request, db: Session) -> bool:
+def _can_edit(request: Request, db: Session) -> bool:
     user = current_user(request, db)
-    return bool(user and user.get("role") == "admin")
+    return bool(user and (user.get("role") == "admin" or user.get("is_analyst")))
 
 
 # ==================== ИНТЕРВЬЮ ====================
@@ -41,15 +41,15 @@ def _is_admin(request: Request, db: Session) -> bool:
 @router.get("/interviews", name="interviews_list")
 def interviews_list(request: Request, db: Session = Depends(get_db)):
     items = interview_service.list_interviews(db)
-    admin = _is_admin(request, db)
+    can_edit = _can_edit(request, db)
     templates_url = _url(request, "interview_templates_list")
     return render(
         request,
         "pages/list.html",
         db,
         title="Интервью",
-        table=interview_views.list_table(request, items, admin),
-        add_url=_url(request, "interview_create") if admin else None,
+        table=interview_views.list_table(request, items, can_edit),
+        add_url=_url(request, "interview_create") if can_edit else None,
         add_label="+ Назначить интервью",
         post_html=f'<a href="{templates_url}" class="btn btn-primary">Шаблоны интервью</a>',
     )
@@ -59,7 +59,7 @@ def interviews_list(request: Request, db: Session = Depends(get_db)):
     "/interviews/create",
     methods=["GET", "POST"],
     name="interview_create",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_create(request: Request, db: Session = Depends(get_db)):
     if request.method == "POST":
@@ -93,7 +93,7 @@ async def interview_create(request: Request, db: Session = Depends(get_db)):
     "/interviews/edit/{id}",
     methods=["GET", "POST"],
     name="interview_edit",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_edit(id: int, request: Request, db: Session = Depends(get_db)):
     if request.method == "POST":
@@ -123,7 +123,7 @@ async def interview_edit(id: int, request: Request, db: Session = Depends(get_db
     )
 
 
-@router.get("/interviews/delete/{id}", name="interview_delete", dependencies=[Depends(require_admin)])
+@router.get("/interviews/delete/{id}", name="interview_delete", dependencies=[Depends(require_analyst_or_admin)])
 def interview_delete(id: int, request: Request, db: Session = Depends(get_db)):
     interview_service.delete_interview(db, id)
     flash(request, "Интервью удалено", "success")
@@ -136,7 +136,7 @@ def interview_delete(id: int, request: Request, db: Session = Depends(get_db)):
 @router.post(
     "/interviews/{id}/audio",
     name="interview_audio_upload",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_audio_upload(id: int, request: Request, db: Session = Depends(get_db)):
     detail_url = _url(request, "interview_detail", id=id)
@@ -192,7 +192,7 @@ def interview_audio_download(aid: int, request: Request, db: Session = Depends(g
 @router.get(
     "/interviews/audio/{aid}/delete",
     name="interview_audio_delete",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def interview_audio_delete(aid: int, request: Request, db: Session = Depends(get_db)):
     interview_id = interview_service.delete_audio(db, aid)
@@ -209,7 +209,7 @@ def interview_audio_delete(aid: int, request: Request, db: Session = Depends(get
 @router.post(
     "/interviews/{id}/transcribe",
     name="interview_transcribe",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_transcribe(id: int, request: Request, db: Session = Depends(get_db)):
     detail_url = _url(request, "interview_detail", id=id)
@@ -239,7 +239,7 @@ async def interview_transcribe(id: int, request: Request, db: Session = Depends(
 @router.get(
     "/interviews/{id}/transcript/edit",
     name="transcript_edit",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def transcript_edit(id: int, request: Request, db: Session = Depends(get_db)):
     interview = interview_service.get_interview(db, id)
@@ -259,7 +259,7 @@ def transcript_edit(id: int, request: Request, db: Session = Depends(get_db)):
 @router.post(
     "/interviews/{id}/transcript/save",
     name="transcript_segments_save",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def transcript_segments_save(id: int, request: Request, db: Session = Depends(get_db)):
     form = await request.form()
@@ -272,7 +272,7 @@ async def transcript_segments_save(id: int, request: Request, db: Session = Depe
 @router.post(
     "/interviews/{id}/segments/clear",
     name="transcript_clear",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def transcript_clear(id: int, request: Request, db: Session = Depends(get_db)):
     interview_service.clear_segments(db, id)
@@ -283,7 +283,7 @@ def transcript_clear(id: int, request: Request, db: Session = Depends(get_db)):
 @router.get(
     "/interviews/{id}/segment/{sid}/delete",
     name="transcript_segment_delete",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def transcript_segment_delete(id: int, sid: int, request: Request, db: Session = Depends(get_db)):
     interview_service.delete_segment(db, id, sid)
@@ -322,7 +322,7 @@ def interview_detail(id: int, request: Request, db: Session = Depends(get_db)):
         "pages/interview_detail.html",
         db,
         title=f"Интервью #{id}",
-        **interview_views.detail_context(request, interview, qas, audios, segments, _is_admin(request, db)),
+        **interview_views.detail_context(request, interview, qas, audios, segments, _can_edit(request, db)),
     )
 
 
@@ -330,7 +330,7 @@ def interview_detail(id: int, request: Request, db: Session = Depends(get_db)):
     "/interviews/{id}/save_as_template",
     methods=["GET", "POST"],
     name="interview_save_as_template",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_save_as_template(id: int, request: Request, db: Session = Depends(get_db)):
     interview = interview_service.get_interview(db, id)
@@ -368,7 +368,7 @@ async def interview_save_as_template(id: int, request: Request, db: Session = De
     "/interview_qa/create",
     methods=["GET", "POST"],
     name="interview_qa_create",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_qa_create(request: Request, db: Session = Depends(get_db)):
     if request.method == "POST":
@@ -400,7 +400,7 @@ async def interview_qa_create(request: Request, db: Session = Depends(get_db)):
     "/interview_qa/edit/{id}",
     methods=["GET", "POST"],
     name="interview_qa_edit",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_qa_edit(id: int, request: Request, db: Session = Depends(get_db)):
     qa = interview_service.get_qa(db, id)
@@ -426,7 +426,7 @@ async def interview_qa_edit(id: int, request: Request, db: Session = Depends(get
     )
 
 
-@router.get("/interview_qa/delete/{id}", name="interview_qa_delete", dependencies=[Depends(require_admin)])
+@router.get("/interview_qa/delete/{id}", name="interview_qa_delete", dependencies=[Depends(require_analyst_or_admin)])
 def interview_qa_delete(id: int, request: Request, db: Session = Depends(get_db)):
     interview_id = interview_service.delete_qa(db, id)
     if interview_id is None:
@@ -442,14 +442,14 @@ def interview_qa_delete(id: int, request: Request, db: Session = Depends(get_db)
 @router.get("/interview_templates", name="interview_templates_list")
 def interview_templates_list(request: Request, db: Session = Depends(get_db)):
     templates = interview_service.list_templates(db)
-    admin = _is_admin(request, db)
-    add_url = _url(request, "interview_template_create") if admin else None
+    can_edit = _can_edit(request, db)
+    add_url = _url(request, "interview_template_create") if can_edit else None
     return render(
         request,
         "pages/list.html",
         db,
         title="Шаблоны интервью",
-        table=interview_views.template_list_table(request, templates, admin),
+        table=interview_views.template_list_table(request, templates, can_edit),
         add_url=add_url,
         add_label="+ Создать шаблон",
         post_html=f'<a href="{_url(request, "interviews_list")}" class="btn btn-primary">К интервью</a>',
@@ -460,7 +460,7 @@ def interview_templates_list(request: Request, db: Session = Depends(get_db)):
     "/interview_templates/create",
     methods=["GET", "POST"],
     name="interview_template_create",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_template_create(request: Request, db: Session = Depends(get_db)):
     if request.method == "POST":
@@ -485,7 +485,7 @@ async def interview_template_create(request: Request, db: Session = Depends(get_
 @router.get(
     "/interview_templates/delete/{id}",
     name="interview_template_delete",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def interview_template_delete(id: int, request: Request, db: Session = Depends(get_db)):
     interview_service.delete_template(db, id)
@@ -497,7 +497,7 @@ def interview_template_delete(id: int, request: Request, db: Session = Depends(g
     "/interview_templates/{id}/question/create",
     methods=["GET", "POST"],
     name="interview_template_question_create",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_template_question_create(id: int, request: Request, db: Session = Depends(get_db)):
     template = interview_service.get_template(db, id)
@@ -527,7 +527,7 @@ async def interview_template_question_create(id: int, request: Request, db: Sess
     "/interview_templates/question/edit/{id}",
     methods=["GET", "POST"],
     name="interview_template_question_edit",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 async def interview_template_question_edit(id: int, request: Request, db: Session = Depends(get_db)):
     question = interview_service.get_template_question(db, id)
@@ -560,7 +560,7 @@ async def interview_template_question_edit(id: int, request: Request, db: Sessio
 @router.get(
     "/interview_templates/question/delete/{id}",
     name="interview_template_question_delete",
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_analyst_or_admin)],
 )
 def interview_template_question_delete(id: int, request: Request, db: Session = Depends(get_db)):
     template_id = interview_service.delete_template_question(db, id)
@@ -583,5 +583,5 @@ def interview_template_detail(id: int, request: Request, db: Session = Depends(g
         "pages/detail.html",
         db,
         title=str(template["name"]),
-        **interview_views.template_detail_context(request, template, questions, _is_admin(request, db)),
+        **interview_views.template_detail_context(request, template, questions, _can_edit(request, db)),
     )

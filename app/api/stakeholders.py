@@ -175,12 +175,15 @@ def stakeholder_detail(id: int, request: Request, db: Session = Depends(get_db))
         return RedirectResponse(_url(request, "stakeholders_list"), status_code=302)
     stakeholder = data["stakeholder"]
     title = f"Стейкхолдер: {stakeholder['last_name']} {stakeholder['first_name']}"
+    user = current_user(request, db)
+    can_edit_interviews = bool(user and (user.get("role") == "admin" or user.get("is_analyst")))
     return render(
         request,
         "pages/stakeholder_detail.html",
         db,
         title=title,
         info=stakeholder_views.detail_info(stakeholder),
+        actions=stakeholder_views.detail_actions(request, id, can_edit_interviews),
         tables=[
             stakeholder_views.projects_table(request, data["projects"]),
             stakeholder_views.requirements_table(request, data["requirements"]),

@@ -89,11 +89,11 @@ def _select_options(items: list[Row], label: Any, selected: Any = None, empty_la
 # ==================== СПИСОК ====================
 
 
-def list_table(request: Request, interviews: list[Row], is_admin: bool) -> Row:
+def list_table(request: Request, interviews: list[Row], can_edit: bool) -> Row:
     rows: list[list[str]] = []
     for interview in interviews:
         actions = [_anchor(request, "interview_detail", "Открыть", "btn btn-success", id=interview["id"])]
-        if is_admin:
+        if can_edit:
             actions.append(_anchor(request, "interview_edit", "Изменить", "btn btn-primary", id=interview["id"]))
             actions.append(_anchor(request, "interview_delete", "Удалить", "btn btn-danger", id=interview["id"]))
         stakeholder = (
@@ -118,11 +118,11 @@ def list_table(request: Request, interviews: list[Row], is_admin: bool) -> Row:
 # ==================== СПИСОК ШАБЛОНОВ ====================
 
 
-def template_list_table(request: Request, templates: list[Row], is_admin: bool) -> Row:
+def template_list_table(request: Request, templates: list[Row], can_edit: bool) -> Row:
     rows: list[list[str]] = []
     for template in templates:
         actions = [_anchor(request, "interview_template_detail", "Открыть", "btn btn-success", id=template["id"])]
-        if is_admin:
+        if can_edit:
             actions.append(
                 _anchor(request, "interview_create", "Создать интервью", "btn btn-warning", template_id=template["id"])
             )
@@ -279,10 +279,10 @@ def detail_info(request: Request, interview: Row) -> list[tuple[str, str]]:
     ]
 
 
-def qa_table(request: Request, interview_id: int, qas: list[Row], is_admin: bool) -> Row:
+def qa_table(request: Request, interview_id: int, qas: list[Row], can_edit: bool) -> Row:
     rows: list[list[str]] = []
     for qa in qas:
-        if is_admin:
+        if can_edit:
             form_id = f"qa-{qa['id']}"
             edit_url = _esc(_url(request, "interview_qa_edit", id=qa["id"]))
             delete_url = _esc(_url(request, "interview_qa_delete", id=qa["id"]))
@@ -316,13 +316,13 @@ def qa_table(request: Request, interview_id: int, qas: list[Row], is_admin: bool
     }
 
 
-def audio_table(request: Request, audios: list[Row], is_admin: bool) -> Row:
+def audio_table(request: Request, audios: list[Row], can_edit: bool) -> Row:
     rows: list[list[str]] = []
     for audio in audios:
         actions = [
             _anchor(request, "interview_audio_download", "Скачать", "btn btn-primary", aid=audio["id"]),
         ]
-        if is_admin:
+        if can_edit:
             actions.append(_anchor(request, "interview_audio_delete", "Удалить", "btn btn-danger", aid=audio["id"]))
         player = (
             f'<audio class="player" controls preload="none" style="height:32px; vertical-align:middle;" '
@@ -343,11 +343,11 @@ def audio_table(request: Request, audios: list[Row], is_admin: bool) -> Row:
     }
 
 
-def transcript_table(request: Request, interview_id: int, segments: list[Row], is_admin: bool) -> Row:
+def transcript_table(request: Request, interview_id: int, segments: list[Row], can_edit: bool) -> Row:
     rows: list[list[str]] = []
     for segment in segments:
         actions = ""
-        if is_admin:
+        if can_edit:
             actions = _anchor(
                 request, "transcript_segment_delete", "Удалить", "btn btn-danger", id=interview_id, sid=segment["id"]
             )
@@ -368,9 +368,9 @@ def transcript_table(request: Request, interview_id: int, segments: list[Row], i
     }
 
 
-def detail_actions(request: Request, interview_id: int, is_admin: bool) -> str:
+def detail_actions(request: Request, interview_id: int, can_edit: bool) -> str:
     actions = [_anchor(request, "interview_export", "Экспорт (Markdown)", "btn btn-success", id=interview_id)]
-    if not is_admin:
+    if not can_edit:
         return " ".join(actions)
     actions.append(
         _anchor(request, "interview_save_as_template", "Сохранить как шаблон", "btn btn-warning", id=interview_id)
@@ -389,8 +389,8 @@ def detail_actions(request: Request, interview_id: int, is_admin: bool) -> str:
     return " ".join(actions)
 
 
-def transcript_controls(request: Request, interview_id: int, is_admin: bool) -> str:
-    if not is_admin:
+def transcript_controls(request: Request, interview_id: int, can_edit: bool) -> str:
+    if not can_edit:
         return ""
     transcribe_url = _esc(_url(request, "interview_transcribe", id=interview_id))
     edit_url = _esc(_url(request, "transcript_edit", id=interview_id))
@@ -412,20 +412,20 @@ def detail_context(
     qas: list[Row],
     audios: list[Row],
     segments: list[Row],
-    is_admin: bool,
+    can_edit: bool,
 ) -> Row:
     interview_id = int(interview["id"])
-    controls = transcript_controls(request, interview_id, is_admin)
-    transcript = transcript_table(request, interview_id, segments, is_admin)
+    controls = transcript_controls(request, interview_id, can_edit)
+    transcript = transcript_table(request, interview_id, segments, can_edit)
     if controls:
         transcript["title"] = transcript["title"] + " " + controls
     upload_url = _url(request, "interview_audio_upload", id=interview_id)
     return {
         "info": detail_info(request, interview),
-        "qa_table": qa_table(request, interview_id, qas, is_admin),
-        "audio_table": audio_table(request, audios, is_admin),
+        "qa_table": qa_table(request, interview_id, qas, can_edit),
+        "audio_table": audio_table(request, audios, can_edit),
         "transcript_table": transcript,
-        "actions": detail_actions(request, interview_id, is_admin),
+        "actions": detail_actions(request, interview_id, can_edit),
         "bottom_script": _RECORD_SCRIPT.replace("__UPLOAD__", html.escape(upload_url)),
     }
 
@@ -451,12 +451,12 @@ def transcript_edit_context(request: Request, interview_id: int, segments: list[
 # ==================== ДЕТАЛИ ШАБЛОНА ====================
 
 
-def template_detail_context(request: Request, template: Row, questions: list[Row], is_admin: bool) -> Row:
+def template_detail_context(request: Request, template: Row, questions: list[Row], can_edit: bool) -> Row:
     template_id = int(template["id"])
     rows: list[list[str]] = []
     for question in questions:
         actions = ""
-        if is_admin:
+        if can_edit:
             actions = " ".join(
                 [
                     _anchor(
@@ -492,7 +492,7 @@ def template_detail_context(request: Request, template: Row, questions: list[Row
         }
     ]
     actions = ""
-    if is_admin:
+    if can_edit:
         actions = " ".join(
             [
                 _anchor(

@@ -51,6 +51,14 @@ def list_table(request: Request, stakeholders: list[dict[str, Any]], is_admin: b
     }
 
 
+def detail_actions(request: Request, stakeholder_id: int, can_edit: bool) -> str:
+    if not can_edit:
+        return ""
+    return _anchor(
+        request, "interview_create", "+ Назначить интервью", "btn btn-success", stakeholder_id=stakeholder_id
+    )
+
+
 def detail_info(stakeholder: dict[str, Any]) -> list[tuple[str, str]]:
     return [
         ("Стейкхолдер", html.escape(f"{stakeholder['last_name']} {stakeholder['first_name']}")),
