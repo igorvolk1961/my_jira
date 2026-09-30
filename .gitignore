@@ -16,6 +16,8 @@ data/backups/
 data/audio/
 data/dev_verify_audio/
 data/*audio/
+data/upo.pid
+data/upo.log
 
 # Файлы окружения
 .env
